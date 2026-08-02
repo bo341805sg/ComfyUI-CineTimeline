@@ -1,0 +1,22 @@
+{
+  "1": {
+    "class_type": "CineTimelineEditor",
+    "inputs": {
+      "timeline_json": "{\n  \"fps\": 24,\n  \"total_frames\": 192,\n  \"shots\": [\n    {\"shot_id\": \"SHOT_001\", \"start_frame\": 0, \"end_frame\": 96, \"global_prompt\": \"cinematic rainy-night platform, stable character identity\", \"local_prompt\": \"medium two-shot, slow lateral dolly\", \"negative_prompt\": \"identity drift, flicker\"},\n    {\"shot_id\": \"SHOT_002\", \"start_frame\": 96, \"end_frame\": 192, \"global_prompt\": \"cinematic rainy-night platform, stable character identity\", \"local_prompt\": \"close-up, character A turns toward character B\", \"negative_prompt\": \"identity drift, flicker\"}\n  ],\n  \"references\": [\n    {\"reference_id\": \"CHAR_A\", \"type\": \"character\", \"target_id\": \"CHAR_A\", \"image_index\": 0, \"start_frame\": 0, \"end_frame\": 192, \"strength\": 1.0, \"adapter\": \"ic_lora\", \"priority\": 100},\n    {\"reference_id\": \"CHAR_B\", \"type\": \"character\", \"target_id\": \"CHAR_B\", \"image_index\": 1, \"start_frame\": 0, \"end_frame\": 192, \"strength\": 1.0, \"adapter\": \"ic_lora\", \"priority\": 100},\n    {\"reference_id\": \"SCENE\", \"type\": \"scene\", \"target_id\": \"SCENE_001\", \"image_index\": 2, \"start_frame\": 0, \"end_frame\": 192, \"strength\": 0.8, \"adapter\": \"guide\", \"priority\": 60},\n    {\"reference_id\": \"BOARD_002\", \"type\": \"storyboard\", \"target_id\": \"SHOT_002\", \"image_index\": 3, \"start_frame\": 96, \"end_frame\": 192, \"strength\": 0.7, \"adapter\": \"guide\", \"priority\": 80}\n  ],\n  \"audio\": [],\n  \"subtitles\": []\n}"
+    }
+  },
+  "2": {
+    "class_type": "CineTimelineLTXAdapter",
+    "inputs": {
+      "timeline": ["1", 0],
+      "shot_id": "SHOT_002",
+      "frame": 0
+    }
+  },
+  "3": {
+    "class_type": "CineTimelineTestOutput",
+    "inputs": {
+      "text": ["2", 2]
+    }
+  }
+}

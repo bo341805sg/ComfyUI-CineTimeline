@@ -1,0 +1,20 @@
+[project]
+name = "cine-timeline"
+version = "0.1.0"
+description = "Model-neutral multi-reference timeline nodes for AI film workflows in ComfyUI"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "bo341805sg" }]
+dependencies = []
+classifiers = [
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/bo341805sg/ComfyUI-CineTimeline"
+Documentation = "https://github.com/bo341805sg/ComfyUI-CineTimeline#readme"
+"Bug Tracker" = "https://github.com/bo341805sg/ComfyUI-CineTimeline/issues"
+
+[tool.comfy]
+PublisherId = "bo341805sg"
+DisplayName = "ComfyUI-CineTimeline"
