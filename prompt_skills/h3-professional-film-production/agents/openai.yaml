@@ -1,0 +1,4 @@
+interface:
+  display_name: "H3 Professional Film Director"
+  short_description: "Direct and compile production-grade MiniMax H3 prompts"
+  default_prompt: "Use $h3-professional-film-production to turn this story and its references into a production-ready H3 timeline plan."

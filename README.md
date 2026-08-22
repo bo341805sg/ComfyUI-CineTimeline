@@ -1,46 +1,420 @@
 # ComfyUI-CineTimeline
 
-Model-neutral multi-reference timeline nodes for AI film workflows in ComfyUI.
-Version 0.1 establishes a stable, testable data contract before adding a
-drag-and-drop frontend editor.
+面向 AI 电影生产的 ComfyUI 多镜头、多参考时间轴。时间轴只描述电影结构，模型
+差异由适配器吸收；切换 MiniMax H3、LTX 2.3 或未来的视频模型时，不需要重建
+镜头、参考资产和背景音乐结构。
 
-## Nodes
+## AI 专业影视规划节点（0.12.1）
 
-- `CineTimeline Editor`: validates and normalizes timeline JSON.
-- `CineTimeline Shot Output`: selects a shot by ID or frame.
-- `CineTimeline Reference Output`: selects active references for a frame range.
-- `CineTimeline LTX 2.3 Adapter`: converts one shot to an LTX-specific plan.
-- `CineTimeline LTX Reference Images`: reorders an input image batch to match
-  active references and emits per-image guide metadata.
-- `CineTimeline LTX Guide Slot`: exposes one active reference's local frame
-  range, strength, type, and image index for public LTX guide nodes.
-- `CineTimeline Test Output`: terminal output used for queue/API validation.
+新增 **Cine AI Timeline Planner**。节点位于模型与生成参数选择之后、`CineTimeline Plan`
+之前，同时接收 `CINE_MODEL_SPEC` 和 `CINE_GENERATION_PROFILE`，因此会严格按已选的 H3
+Ref2VA / FL2VA 模式、参考上限、分辨率、时长以及当前 LoRA 链规划，不会擅自切换视频模型。
 
-References support `character`, `costume`, `scene`, `prop`, `pose`,
-`storyboard`, `first_frame`, `last_frame`, and `audio`. Every reference has an
-active frame range, strength, target identity, priority, adapter hint, and an
-optional `image_index` into a connected ComfyUI image batch.
+Planner 连接 OpenAI 兼容的多模态服务，默认地址为
+`http://192.168.10.27:8080/v1`，当前默认服务模型为 `Qwen3.8-27B-Uncensored-Q5_K_M.gguf`。它接收剧情、可选 IMAGE 批次、参考素材清单和额外导演要求，
+加载插件内置 `h3-professional-film-production` Skill 的运行时蒸馏核心，把人物视觉设计、影视表演、六维台词、
+美术、摄影、灯光色彩、动作/VFX、声音音乐、剪辑、连续性、参考关系和 LoRA 适配编译为
+正式 `CINE_TIMELINE`。API 密钥只从 `CINE_AI_API_KEY` 环境变量读取，不写入工作流。
 
-Ranges are half-open: `start_frame` is included and `end_frame` is excluded.
-Shots cannot overlap. References may overlap and are ordered by priority.
+节点输出 `timeline`、标准 JSON、规划报告和引用计划；执行完成后，节点内置面板可逐段查看
+提示词、表演设计、生成模式、首尾状态和参考图片索引。推荐链路：
 
-## Current validation boundary
+```text
+Cine H3 Model Loader ── model_spec ──┐
+                                     ├─> Cine AI Timeline Planner ─> CineTimeline Plan
+Cine Generation Profile ─────────────┘
+```
 
-- Core schema and node unit tests: 12 passed.
-- Installed in the shared formal custom-node library on 2026-08-02.
-- All six nodes registered in ComfyUI 0.28.0 on port 8189.
-- The API test workflow completed successfully with prompt ID
-  `f15bdf2d-704c-46cd-ad33-81eb508f53fe`.
-- The backend/API suite passes 13/13 tests and all seven nodes load in the shared
-  8188/8189 installation.
-- Real LTX 2.3 generation is validated on 8189: the T2V baseline, timed public
-  Guide experiment, and distilled dual-character IC-LoRA pipeline all completed.
-- The validated dual-character pipeline uses distilled LoRA 0.5, dual-character
-  IC-LoRA 1.0, `LTXAddVideoICLoRAGuide`, the official 8-step sigma schedule, and
-  `euler_ancestral_cfg_pp`. Its one-second 384x256 run is a wiring smoke test;
-  production dialogue shots should follow the LoRA author's >=10 second guidance.
+IMAGE 输入仅用于规划模型的视觉分析；可执行渲染引用仍必须在 `reference_manifest_json` 和
+生成时间线中保留有效的 ComfyUI `asset_id`。关闭图像分析后，Planner 只使用用户提供的标签
+与素材元数据，不会声称看过图片。
 
-The LTX adapter and Guide Slot now drive concrete public LTX Guide nodes. Ordinary
-timed guides can schedule keyframes but may morph one character into another;
-simultaneous character identity should use the validated dual-character IC-LoRA
-example instead.
+完整 13 模块知识库用于维护、专项规则更新和测试；每次普通规划只注入压缩后的
+`runtime-director-profile.md`，避免本地 27B 服务因长上下文预填充超过连接时间。规划报告仍会
+记录本次剧情命中的专业知识模块。
+
+### 中英文界面
+
+Timeline、模型组件、生成参数、成片输出与 AI Planner 面板自动跟随 ComfyUI/浏览器语言：
+中文环境显示中文，其他语言默认显示英文，不在每个节点重复显示语言控件。工作流内部键、模型
+文件名和服务枚举值不会被翻译，因此语言变化不会改变执行数据或破坏旧工作流。
+
+## 片段生成与自动补全串联架构（0.10.2）
+
+0.10.1 改进“串联完整影片”的 Motion Context 接缝。单片段结果仍保持 124 帧不变；
+手动串联遇到“运动上下文续接”时，会验证当前版本记录的来源片段 ID、来源版本 ID、
+来源 latent SHA-256 与此刻选中的上一片段版本完全一致，然后解码当前版本 latent 中
+被裁去的 22 帧重建历史，用它替换上一片段最后 22 帧。音频不再简单按原片段边界硬拼，
+而是从同一个已验证 AV latent 解码等时长的声音把手，一起替换上一片段尾部；这避免了
+画面连续但现场声在硬拼点突然掉电平的问题。总帧数和时间轴时长不变，也不重新执行
+扩散采样。若版本谱系或哈希不匹配则拒绝串联，
+防止用户改选片段版本后错误套用旧手柄。
+
+0.10.2 把同一版本谱系校验提前到时间轴界面。中间片段改选或重生成后，所有仍绑定旧
+上游版本的 Motion Context 下游片段会显示“续接源已过期”：旧视频仍保留并可预览，但不再
+计入自动串联的可用片段；“串联完整影片”会从第一个过期片段开始按顺序补生成，避免直到
+后端装配阶段才发现错误，也避免把旧的第三段错误接到新的第二段。
+
+0.10.0 正式加入可选“运动上下文续接”。它直接调用
+`ComfyUI-H3-Motion-Context` 的原生 Load / Motion Context / Trim / Save Latent 节点，
+不复制第三方算法。每次单片段生成都会把采样器 AV latent 保存到由
+`片段 ID + render_run_id` 决定的独立文件，并在视频版本中登记相对路径、SHA-256、
+分辨率以及来源片段/版本；下一片段只读取上一片段当前激活版本登记的精确文件，
+不会使用“自动找最新 latent”。重生成结果会追加为新版本，不再覆盖旧版本数组。
+
+运动上下文默认钉住 22 帧画面与 24 帧声音。Renderer 使用不越过片段终点的最近合法
+H3 长度，Trim 后只在交付端以最后可见帧/静音补足时间轴请求的少量帧，避免把观众未见的
+未来帧写入下一段上下文。该模式绕过旧的一秒声音开场静音门控，并自动加入不重演动作、
+不复述对白、不复制主体、不中断现场声场的开场连续性约束。旧“尾帧续接”继续保留，
+用于只需要姿态/构图锚点的低成本衔接。
+
+0.9.9 将 ComfyUI 自动加载的前端脚本从 47 个收敛为两个独立实现入口：
+`cine_studio_099.js` 与 `cine_timeline_099.js`。旧版本缓存入口移到
+`archive/frontend-cache-shims/`，不再重复解析同一份界面代码，但可按需恢复。
+本版不删除 Legacy 节点，也不改变正式 H3 生成链路。
+
+0.9.8 将 `CineTimeline Plan` 精简为 `model`、`generation_profile` 和 `timeline_json`
+三个基础输入，移除尚未形成稳定合同的外部提示词端口。未来等 CineOS 产出真实编译包后，
+再以一个结构化离线包输入统一导入提示词与参考，避免时间轴继续堆叠临时端口。
+
+0.9.7 将 `Ctrl+Enter` 绑定到与“串联完整影片”按钮完全相同的状态机：跳过已有片段、
+逐个补全缺失片段，最后自动串联，不再触发 ComfyUI 默认的全图输出。
+
+0.9.6 将尾帧继承改为明确的转场选项。后续片段只有选择“尾帧续接”时才读取
+上一片段最后可见帧，并把它放在所有显式图片参考之后；全局人物参考继续负责身份，
+尾帧只补充姿态与构图连续性。直接切换、叠化、淡入淡出和匹配剪辑均不继承尾帧，
+因此不再需要“新场景”勾选框。尾帧额外占用一个 Ref2VA 图片/总参考名额。
+
+0.9.4 的“串联完整影片”按钮可以在片段未全部生成时直接使用。它按时间轴顺序跳过已有结果，
+逐个生成缺失片段；每段完成并登记到正确位置后继续下一段，最后自动串联完整影片。
+参考校验、续接限制或执行错误会停止自动流程并保留已完成结果。
+
+0.9.3 将单片段结果按 ComfyUI `prompt_id` 回查提交时冻结的
+`render_target_shot_id`。生成期间切换正在编辑的片段，或连续排队多个片段，完成结果都不会再被写入当前查看片段。
+
+新版日常 H3 工作流固定为八个节点，并拆成互不重复执行的两条输出分支：
+
+1. **Cine H3 Model Loader**：生产基线固定使用成对 INT8 ConvRot 扩散模型和
+   Qwen3-VL 文本编码器；加速 LoRA 固定为第一项，Ref2VA 与 FL2VA 统一使用
+   LightX2V v1.0 BF16（8-step、强度 0.75）。其后仍可维护最多 7 个有序 LoRA，同时输出真实 `MODEL`
+   和可序列化 `MODEL_SPEC`。
+2. **MiniMax H3 Mem Eff Sage Attention Patch**：直接使用 KJNodes 原节点。
+3. **Cine Generation Profile**：只设置分辨率、步数、种子和参考尺寸。步数不再
+   被某个隐藏“加速模式”覆盖，注意力也不再藏在参数 JSON 中。
+4. **CineTimeline Plan**：在图形时间轴中编辑片段、提示词、多类型参考，以及位于视频轨
+   下方的多段背景音乐轨；只验证并输出中立渲染请求，不加载模型或执行采样。
+5. **Cine H3 Timeline Segment Renderer**：接收第三方 Sage 已处理的真实 `MODEL`，
+   只为当前片段调用第三方原版 `MiniMaxH3DualClockSamplerT8`，再解码片段画面与声音。
+6. **Save Last Generated Segment**：保存当前片段的原生结果，不提前烘焙全局背景音乐。
+7. **CineTimeline Manual Movie Assembler**：读取视频轨中每个片段当前选中的已保存版本，
+   按时间轴顺序拼接并混入背景音乐；不加载 H3，也不执行扩散采样。
+8. **Save Complete Video**：对手动串联结果执行可选成片增强，统一交付尺寸，并在最终封装前
+   默认将完整混音标准化到 `-15 LUFS / -1 dBTP`，再保存带原生镜头声音与背景音乐
+   的完整影片。
+
+### MiniMax H3 分段级二次采样（实验）
+
+H3 生成参数可加入可选 `second_pass`。该功能默认关闭；开启后，每个片段在第一次 H3
+采样后独立执行 NVIDIA RTX Video Super Resolution、H3 VAE 重编码和低降噪第二次采样，
+然后强制把第一次采样的音频 latent 放回最终 AV latent。这样二次采样只改善画面，不会
+重新生成对白；下一片段的连续性参考读取精修后的可见末帧。
+
+```json
+{
+  "second_pass": {
+    "enabled": true,
+    "upscaler": "nvidia_rtx_vsr",
+    "scale": 1.5,
+    "quality": "ULTRA",
+    "steps": 3,
+    "denoise": 0.3,
+    "preserve_original_audio": true
+  }
+}
+```
+
+当前实验链路要求安装 `Nvidia_RTX_Nodes_ComfyUI` 与
+`ComfyUI-PT_H3ConcatAVLatent`。目标宽高会自动对齐到 H3 所需的 32 像素网格；例如
+`864x480` 的 `1.5x` 配置输出 `1312x736`。在完成固定素材 A/B 之前，不应把该选项设为
+正式工作流默认值。
+
+两个保存节点在正式示例中默认设为“不随顶部一键运行执行”。时间轴的“生成当前片段”
+按钮只定向运行片段保存分支；“串联完整影片”按钮只定向运行手动串联与成片保存分支。
+片段重生成后，旧完整影片会显示“需更新”，但不会自动串联，避免重复加载模型或误覆盖
+用户正在比较的片段结果。
+
+公开画布直接使用第三方 Sage 的 `MODEL → MODEL` 节点；TE-Speed 经同 seed A/B
+确认会在 T8 双时钟 8 步流程中产生严重多重残影，已从正式依赖和画布移除。Cine
+自定义节点只保留模型配置、时间轴与多片段编排。第三方双时钟节点是单片段的
+`MODEL / AV_LATENT → MODEL / SAMPLER / SIGMAS`，因此由 Timeline Renderer 按片段
+逐个调用；Cine 不复制或重写其采样算法。旧参数 JSON 中的 `attention` 仅为旧工作流
+兼容保留，新工作流会在载入时移除。
+
+0.8.8 起，当片段提示词已经使用 MiniMax H3 官方
+`integrated_multimodal_description / overall_soundscape / non_diegetic_music` 三段结构时，
+Renderer 会把全局身份、参考映射和视觉负面约束并入第一段，不再额外包裹
+`Generated video:` 或 `Avoid:`。对白使用 `(S1)/(S2)` 与 `<d>[Chinese] ...</d>`；环境声
+在画面描述和 `overall_soundscape` 中同时写明持续区间与具体声源，非叙事配乐只通过
+`non_diegetic_music` 表达。
+
+0.8.9 进一步允许把完整三字段结构放进全局提示词：Renderer 会把全局画面与声音场作为
+公共基线，只把当前片段动作和对白并入 `integrated_multimodal_description`。片段元数据
+`audio_tail_seconds` 定义声音尾部安全区；编译器按实际片段时长自动计算截止时刻，要求
+对白、拍岸强瞬态和退水尾音提前完成，尾部只保留稳定环境底声。最后一个片段还会要求
+环境底声在安全区内自然渐弱并完成收尾，避免输出边界直接截断声音事件。
+
+0.9.1 修正三字段被拆放在不同输入框时的降级拼接问题。全局框和片段框都允许只包含
+部分 H3 字段；Renderer 会把片段画面内容稳定注入 `integrated_multimodal_description`，
+把片段声音并入 `overall_soundscape`，并单独选择 `non_diegetic_music`。全局画面字段可用
+`{{segment_prompt}}` 或 `{{片段提示词}}` 指定注入位置；没有占位符时自动追加到画面字段
+末尾。最终发给 H3 的三个字段始终各出现一次，并保持官方顺序。
+
+正式运行依赖为 ComfyUI、KJNodes 的
+`MiniMaxH3MemoryEfficientSageAttentionPatch` 与 `minimax-h3-audio-T8 1.3.2`。
+选择“运动上下文续接”时额外依赖独立 GPL-3.0 插件 `ComfyUI-H3-Motion-Context`；
+CineTimeline 本身仍为 Apache-2.0，两者保持独立安装和许可边界。
+ReservedVRAM 只保留为独立显存诊断工具，不进入生产画布；UniBlockSwap 不属于正式
+依赖，也不会自动安装。0.8.9 为模型、参数、时间轴、渲染器、保存节点以及公开 Sage
+节点定义了符合默认内容量的初始宽高；自定义 DOM 节点会在面板挂载后恢复保存尺寸，
+并在每次拖动外框后同步更新内部 DOM 宿主的宽高。这样既避免模型列表异步加载时把
+`Cine H3 Model Loader` 意外压窄，也不会在放大节点后留下固定大小的内部内容区。
+首次载入旧工作流会执行一次尺寸迁移，之后用户仍可自由调整并保存尺寸。
+
+Timeline Renderer 的 `MODEL` 输入使用 ComfyUI 动态子图规定的 `rawLink` 方式保留
+上游节点链接。不得把已经解析的 `ModelPatcher` 对象作为子图常量，否则真实执行器会
+在逐片段子图展开后长期处于 pending 状态。
+
+当前正式 H3 基线是相同量化族的 INT8 ConvRot 扩散模型与
+`qwen3vl_32b_minimax_h3_int8_convrot.safetensors`，8188 必须使用
+`--disable-dynamic-vram` 启动。加载器会在执行前拒绝 INT8/NVFP4 混搭，也会拒绝在
+未关闭 DynamicVRAM 的进程中加载 INT8。完整 LightX2V LoRA 由用户确认强制用于这条
+生产链。0.11.1 起，按本机生产选择将 LightX2V v1.0 BF16 统一应用到 Ref2VA 与
+FL2VA，固定强度 0.75、默认 8 步；加载器会移除旧 v0.1 或重复加速项，防止同时加载。
+
+旧 **CineTimeline Studio** 仍注册，用于打开已保存的四节点工作流；新工作流不会再把
+Turbo LoRA、双时钟和步数选择同时藏在时间轴节点内部。
+
+时间轴不再提供独立对白、环境声、短音效或字幕轨。各片段由支持原生音频的
+视频模型一体化生成声音；时间轴只额外处理可跨越多个片段的背景音乐。
+
+0.4.0 起，\`global_prompt\` 与 \`negative_prompt\` 是时间轴顶层的全片公用字段；
+每个片段只编辑 \`local_prompt\`。界面统一使用“片段”，因为这里表示一次独立生成的
+视频段，一个片段提示词可规划一个或多个真正的电影镜头。为保持旧工作流兼容，
+内部集合名仍为 \`shots\`、标识字段仍为 \`shot_id\`；旧数据会在载入时自动迁移。
+
+0.5.3 起，片段提示词固定显示在片段编辑区最上方；全局提示词与全局负面提示词放在
+独立的“全片提示词”区域，不再表现为当前片段字段。“生成结果与版本”用于管理同一
+片段多次生成后的候选视频，默认收起并位于编辑区底部。第一节点也不再裸露通用
+\`model_profile\` 字段；H3 工作流只显示“多参考 Ref2VA / 首尾帧 FL2VA”两种生成模式，
+内部字段仅为旧工作流序列化与适配器兼容而保留。
+
+0.8.6 起，旧版“全局设置”中的单文件背景音乐被独立的“背景音乐轨”取代。“全局设置”
+只保留全局提示词、全局负面提示词和通用参考；“当前片段”只保留当前片段提示词、时长、
+转场和片段参考。背景音乐轨位于视频轨下方，可加入任意多段 WAV、MP3、FLAC、M4A、
+AAC 或 OGG。每段音乐可以拖动位置、拖动左右边缘，或在属性区输入开始/结束时间，所有
+时间按 0.1 秒吸附；音量、循环、淡入、淡出分别设置。旧的单个 `background_music` 对象
+会自动迁移为数组中的 `BGM_001`，工作流仍只保存 ComfyUI 相对资产标识。
+
+视频片段继续首尾相接：新增片段固定增加 5.0 秒，单片段允许 5.0–15.0 秒。拖动片段
+本体调整顺序，拖动右边缘或输入秒数调整时长，程序自动换算 24 FPS 内部帧数。Renderer
+默认把内部原生 `SamplerCustomAdvanced` 的 H3 latent 预览转发到可见节点；采样过程中会
+持续显示低成本模糊预览，可据此点击 ComfyUI 顶部“取消/中断”停止不合格片段。也可以
+切换为“片段完成后”只看解码中间帧，或完全关闭预览。Cine 不实现另一套采样器。
+
+0.5.0 起，时间轴顶层的片段栏改为“视频轨”；有可用文件时会显示缩略视频并在悬停时
+播放。0.9.2 将按钮统一为“生成当前片段”：无论首次生成还是返工，都只保存并替换视频轨
+中的这一段，其余片段结果保持不变。依赖上一片段末帧的续接片段不能脱离前一段单独重跑。
+全部片段都有可用结果后，“串联完整影片”才会开放；它使用各片段当前版本和背景音乐轨，
+输出另一份完整影片结果，不再触发双时钟采样。
+
+### 多 LoRA 模型链
+
+- 多 LoRA 在第一个节点管理；数组顺序就是实际加载顺序。完整 LightX2V v1.0
+  固定占用第 1 项，不能关闭、删除或改名；Ref2VA 与 FL2VA 均固定强度 0.75、默认 8 步。
+- 每项可独立启用并设置 `strength_model`；不再要求填写人物、风格、运动、画质、
+  声音或功能等人工类型，因为类型不参与实际加载与采样。除固定 LightX2V 外最多再加
+  7 项；已启用的同名 LoRA 会被拒绝。
+- H3 新链路为“基础扩散模型 → LoRA 管理器 1…N → 注意力补丁 → 独立双时钟采样”。
+  LightX2V 的文件、强度和默认步数随 Ref2VA / FL2VA 配方切换；其他 LoRA 按用户
+  设置继续串联。
+- LTX 链路保留“蒸馏 LoRA → 参考/Ingredients LoRA”两个锁定功能层，用户 LoRA
+  接在它们之后；用户列表不会覆盖模型预设必需的 IC-LoRA。
+- 普通条目使用模型侧 `LoraLoaderModelOnly`；文件名匹配 H3 4步 Turbo 的条目会透明
+  改用 `MiniMaxH3TurboLoRA`；LightX2V 使用标准模型侧 LoRA 加载器。
+- 双时钟采样由公开 `H3 Dual-Clock Sampler` 聚合节点负责，内部仍按片段展开
+  `MiniMaxH3DualClockSamplerT8`，因为每个片段的参考、潜空间和时长都不同。
+- LoRA 强度不会自动归一化。应从单个、较低强度开始逐一叠加，角色、动作、声音和
+  画质 LoRA 冲突时可能降低身份、运动或音频稳定性。
+
+默认可视化工作流：
+`examples/CineTimeline-four-node-H3-Ref2VA-10s.json`
+
+当前正式生产工作流：
+`examples/production/CineTimeline-H3.json`
+
+旧片段生成与手动串联安全基线：
+`examples/CineTimeline-H3-片段生成与手动串联-安全示例.json`
+
+4×10 秒日式和室阳光雨母子温情案例：
+`examples/CineTimeline-H3-日式和室阳光雨-母子温情-40秒.json`
+
+真实队列烟雾测试：
+`examples/CineTimeline-four-node-H3-Ref2VA-smoke-API.json`
+
+已选定 CKPT T8 双时钟 8步 / ckpt500 0.55 旧四节点烟雾测试：
+`examples/CineTimeline-four-node-H3-Ref2VA-T8-0p55-smoke-API.json`
+
+基础 H3 文生视频（显式 Sage 加速与双卡分工节点）：
+`examples/CineTimeline-H3-T2V-Sage-Aux-5s.json`
+
+对应 API 工作流：
+`examples/CineTimeline-H3-T2V-Sage-Aux-5s-API.json`
+
+H3 双图片多参考生视频（显式 Sage 加速与双卡分工节点）：
+`examples/CineTimeline-H3-Ref2VA-MultiRef-Sage-Aux-5s.json`
+
+对应 API 工作流：
+`examples/CineTimeline-H3-Ref2VA-MultiRef-Sage-Aux-5s-API.json`
+
+H3 FL2VA 两 SHOT 尾帧续接（时间线无重叠、生成阶段隐藏把手）：
+`examples/CineTimeline-four-node-H3-FL2VA-continuity-10s.json`
+
+对应 API 工作流：
+`examples/CineTimeline-four-node-H3-FL2VA-continuity-10s-API.json`
+
+## 成片增强与标准交付尺寸
+
+第七节点提供四档可替换增强器：
+
+- `Off`：不重建细节，只按需适配最终尺寸；
+- `LTX Detailer Fast (Temporary)`：临时快速高清方案；
+- `LTX Detailer Fidelity (Experimental)`：缩小重绘噪声区间，优先保留 H3 的人物、
+  构图与运动，降低快速档可能出现的重影；
+- `SeedVR2 7B Final`：速度较慢、保真度更高的最终成片方案。
+
+增强在每个 SHOT 内独立执行，完成后才重新拼接，因此不会让时序模型跨越硬切点。
+LTX 临时方案先用 Lanczos 放大，再以精确 Detailer LoRA 做三步低噪重建。每段视频
+自动向上补齐到 LTX `8k+1` 帧网格，解码后裁回该 SHOT 的原始可见帧数；补帧不会
+进入最终视频。原生台词与环境声音轨、跨镜头背景音乐均保持原有相对比例。
+
+保存节点默认使用 FFmpeg EBU R128 响度处理将最终整条混音统一到 `-15 LUFS`，并以
+`-1 dBTP` 真峰值上限避免提升音量后削波。该处理只作用于所有片段和背景音乐已经
+合成后的最终音轨，不会分别拉高对白或雨声，因此不会改变混音平衡。可关闭“统一成片
+响度”以保留模型生成的原始电平，也可针对交付平台调整目标 LUFS 和真峰值。
+0.8.7 会把旧工作流在该新增布尔控件上遗留的空字符串迁移为“已启用”，避免面板显示
+已勾选、执行图却收到 `false`；新生成的正式工作流会显式保存 `true / -15 / -1`。
+
+生成模型与后处理模型之间设有内部执行屏障：它只保证所有 SHOT 画面先完成，不再
+卸载或清空 H3 模型缓存。H3 跟随 ComfyUI 启动时选择的物理 GPU，插件不会硬编码
+GPU0 或 GPU1。第七节点只显示明确的 `GPU0`、`GPU1`，默认值根据当前环境设置；
+LTX/SeedVR 的扩散模型与 VAE 放到所选 GPU，CLIP 放到 CPU。ComfyUI 使用
+`CUDA_VISIBLE_DEVICES` 重排运行时 CUDA 编号时，插件会转换回物理 GPU 编号，避免
+把 `cuda:0` 错当成物理 GPU0。DynamicVRAM 仍会按推理压力调整驻留分块。
+
+新建七节点工作流默认交付标准 `1280×720`，也可显式选择保持内部尺寸。标准化使用中心适配，不向用户
+暴露 LTX 的 1280×704 等内部网格尺寸。增强器通过稳定的输出节点接口隔离；以后验证
+官方 LTX x2 放大模型时，只需新增或替换后端适配器，不修改时间轴数据和七节点画布。
+
+## 当前模型适配器
+
+### MiniMax H3 Ref2VA（默认）
+
+- 原生 24 fps 视频和立体声音频。
+- 每个 SHOT 可使用最多 9 张图片、3 段视频、3 段音频，所有参考合计不超过 12。
+- 最低只需一个图片参考或一个视频参考，不要求两个参考；一张图的 Ref2VA 与单图首帧
+  I2VA 是不同控制方式，可在模型节点的 H3 生成模式中选择。
+- 推荐每个 SHOT 为 124–362 帧（约 5–15 秒），帧数会对齐到 `17k+5`。
+- 参考图、参考视频和声音参考在时间轴中按有效范围自动分配给相交的 SHOT。
+- ComfyUI 原生 `MiniMaxH3ReferenceToVideo` 支持零参考输入；没有图片、视频参考且未选择
+  “尾帧续接”时，时间轴直接执行独立纯文生。
+- FL2VA 模式下加入第一张图片会自动标为首帧，加入第二张会自动标为尾帧；只提供首帧
+  即为单图 I2VA，只提供尾帧可执行 L2VA。
+- `quality` 为默认注意力模式；`preview_sage` 用于预览。旧版
+  `preview_sage_sol_safe` 会自动迁移为 `preview_sage`。Sol 安全档在 362 帧 A/B 中
+  仅比 Sage 短约 6.35%，短片只快约 1.32%，快档还出现主体数量漂移，因此插件依赖与
+  正式分支已经退役。
+- 生成参数直接编辑步数，默认 8；不再提供把 LoRA、双时钟和步数捆绑在一起的
+  “采样模式”。普通 T8 LoRA 默认出现在模型节点，强度 1.0，可删除或替换。
+- 独立双时钟节点默认视频 Shift 12、音频 Shift 3，并把参数节点的步数传给每个
+  片段的原生双时钟采样器。旧四节点中的原生/普通 T8/CKPT T8 标识仍可解析。
+- 片段视频保存成功后，只登记到对应片段的视频轨；完整影片保存成功后独立登记为
+  `complete_movie`。片段更新会把既有完整影片标记为过期，等待用户手动重新串联。
+- GPU 分配会显示实际物理编号，例如当前 8188 为“GPU1：H3 / GPU0：文本与图片
+  编码”。H3 始终跟随 ComfyUI 启动设置；分离方案只把 Qwen3-VL-32B 编码器放到
+  另一张可见 GPU，不等同于双 GPU 并行采样。
+
+### MiniMax H3 FL2VA
+
+- 使用首帧和可选尾帧条件，不接受 Ref2VA 的多参考组合。
+- 首段无视觉参考时直接纯文生。后续片段只有选择“尾帧续接”才提取上一片段最后
+  可见帧；其他转场均独立生成，因此界面不再提供“纯文生”“续接上一段”或“新场景”开关。
+- FL2VA 把续接尾帧作为下一片段首帧锚点并裁掉重复帧；Ref2VA 则在保留显式人物、
+  场景和道具参考的同时，把它追加为最后一张隐式参考图。旧工作流中的
+  `continue_from_previous` 会迁移为“尾帧续接”。
+- H3 当前只支持一个精确首帧锚点。界面保留 1–3 帧隐藏把手设置，但精确模型条件
+  只使用最后 1 帧；额外把手用于后续转场能力，不会冒充多帧时间条件。
+- 适配器会同时裁掉下一镜头重复锚点、H3 `17k+5` 对齐余量和对应音频区间，最终
+  成片严格服从 SHOT 的可见帧数。
+- 模型组件缺失时，第一个节点会直接显示不可用，不会静默切换模型。
+
+### LTX 2.3
+
+- 保留稳定双角色和 Ingredients 两个预设。
+- 新时间轴会自动编译为现有 LTX 2.3 生产控制台需要的参考板和逐镜头计划。
+- Ingredients 适合人物、服装、场景、道具等元素参考；故事板应先拆成画格或镜头
+  关键帧，不应直接把整张时序故事板当作 Ingredients 参考板。
+
+### H3 开场声音保护
+
+`metadata.audio_lead_seconds` 用于提示 H3 在片段开头先建立环境声、延后人物对白；它不再等同于后期静音长度。为抑制偶发的开头人声爆音，CineTimeline 仅门控最前面的 `0.2` 秒并用 `0.08` 秒淡入，避免把第一句对白的开头一并切掉。
+
+凡片段提示词包含 `<d>...</d>` 对白标签，H3 编译器会自动加入严格对白约束：只允许标签内的说话人和逐字台词，每句只生成一次；实际发音必须与标签文字精确一致，禁止增字、漏字、改字、口吃、异常拉长，以及任何字词、短语或句内子串重复。同时禁止未标记人声、画外人声、复读、耳语、含混拟语、延迟副本及明显回声；对白默认使用低混响直达声。
+
+`Cine H3 Dialogue Validator` 是可选的生成后验收节点。它从当前单片段渲染请求的 `<d>` 标签自动提取预期台词，使用本地 `whisper-large-v3-turbo` 转写生成音频，再报告增字、漏字、错字和复读差异。节点不修改音频、不自动重跑，未安装 ASR 权重时返回 `model_missing`，不会阻塞原有生成链路。默认在 CPU 运行，避免与 GPU1 的 H3 去噪及 GPU0 的 32B 文本/图片编码争抢显存；也可手动改用 GPU0 或 GPU1。
+
+## 参考数据
+
+每条参考同时包含两类信息：
+
+- `type`：人物、服装、场景、道具、姿态、故事板、首帧、尾帧、风格、运动等
+  电影语义。
+- `media_type`：`image`、`video` 或 `audio`，决定适配器如何加载和连接素材。
+
+参考区间使用半开格式：包含 `start_frame`，不包含 `end_frame`。参考可以贯穿
+全片，也可以只在一个或若干 SHOT 生效。模型的参考数量和类型限制由第二、第三
+节点在编译时校验。
+
+## 兼容性节点
+
+0.1.0 的 12 个节点仍然注册，并在显示名称中标记为 **Legacy**。旧 LTX 工作流可
+继续打开；新项目使用当前八节点 H3 工作流。插件当前共注册 29 个节点，其中正式
+工作流直接使用 7 个 Cine 节点和 1 个上游 Sage 节点；其余 Cine 节点用于兼容、
+动态子图执行与诊断。显式标记为 Legacy 的 13 个节点本轮保留，不做破坏性删除。
+
+## 验证状态
+
+- Python 单元测试：91/91 通过。
+- JavaScript 时间轴和参数面板通过语法检查。
+- 唯一正式环境为 Windows 8188，ComfyUI 版本 0.30.0。
+- 已有 MiniMax H3 Ref2VA 原生工作流在两张 GPU 上完成 864x480、124 帧、24 fps、
+  20 步、原生立体声音频验证。
+- GPU0 编码器已在 Windows 8188 完成真实 5.17 秒 H3 成片 A/B：热缓存 GPU1
+  峰值 30,598 MiB，分离方案 GPU1 峰值 19,334 MiB、GPU0 峰值 17,818 MiB；解码后
+  全部视频帧和音频样本完全一致。端到端速度基本持平，因此该方案定位为显存安全档。
+- 15.08 秒、362 帧复测同样通过：单 GPU1 峰值 29,574 MiB、稳定采样
+  25,414 MiB；分离方案 GPU1 峰值和稳定采样均为 21,190 MiB，GPU0 峰值
+  18,110 MiB。两条成片解码内容完全一致，耗时 352.84 秒与 350.44 秒基本持平。
+- 基础零参考文生视频已在 8188 真实通过：Sage `auto`、GPU0 文本编码、
+  864x480、124 帧、20 步，端到端 71.31 秒；GPU1 峰值 19,044 MiB/65°C，GPU0
+  15,926 MiB/43°C。输出为 5.17 秒 H.264，并带 32 kHz 双声道 AAC 原生音频。
+- 双图片 Ref2VA 多参考工作流也已在 8188 真实通过：`DiffusionModelLoaderKJ`
+  显式设置 Sage `auto`，文本与参考图编码器使用 GPU0。864x480、124 帧、
+  20 步热缓存运行耗时 63.0 秒；GPU1 峰值 18,726 MiB/66°C，GPU0 峰值
+  17,590 MiB/48°C。成片同时保持红裙母亲和绿衫男孩两张参考图的身份、服装与
+  同框动作，并带 32 kHz 双声道 AAC 原生音频。
+- FL2VA 尾帧续接已在 8188 真实通过：两个可见 SHOT 各 124 帧；第二 SHOT 内部
+  生成 141 帧并裁掉 1 帧重复首帧与 16 帧对齐余量。最终 MP4 为 864x480、
+  248 帧、24 fps、10.333 秒，AAC 为 32 kHz、10.334 秒。第 123/124 帧并不相同，
+  且切点音频跳变仅为全片相邻采样差 99 分位的 1.16 倍，未出现黑帧或明显爆音。
+
+Apache-2.0 License。

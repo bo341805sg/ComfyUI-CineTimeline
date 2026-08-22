@@ -1,6 +1,6 @@
 [project]
 name = "cine-timeline"
-version = "0.1.0"
+version = "0.12.1"
 description = "Model-neutral multi-reference timeline nodes for AI film workflows in ComfyUI"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
