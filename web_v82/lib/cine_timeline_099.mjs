@@ -4,10 +4,13 @@ import { languageSelect, localizeDom, onLocaleChange, tr } from "./cine_i18n_099
 
 console.info("[CineTimeline] v0.11.0 dialogue validation routing loaded");
 
-const TIMELINE_LAYOUT_VERSION = 60;
-const TIMELINE_SIZE_LAYOUT_VERSION = 6;
+const TIMELINE_LAYOUT_VERSION = 63;
+const TIMELINE_SIZE_LAYOUT_VERSION = 7;
 const TIMELINE_DEFAULT_HEIGHT = 920;
 const TIMELINE_MIN_NODE_HEIGHT = 720;
+const TIMELINE_MIN_NODE_WIDTH = 760;
+const TIMELINE_MAX_NODE_WIDTH = 1600;
+const TIMELINE_MAX_NODE_HEIGHT = 1800;
 const CINE_BUTTON_ACTIONS = globalThis.__cineTimelineButtonActions ||= new Map();
 let cineButtonActionSequence = Number(globalThis.__cineTimelineButtonActionSequence || 0);
 const TIMELINE_MIN_HEIGHT = 420;
@@ -301,7 +304,7 @@ function exposeNodeResizeGutter(root) {
     const host = root.parentElement;
     if (host?.classList?.contains("dom-widget")) host.style.pointerEvents = "none";
     root.style.pointerEvents = "auto";
-    root.style.width = "calc(100% - 16px)";
+    root.style.width = "calc(var(--cine-timeline-host-width, 100%) - 16px)";
     root.style.height = "calc(100% - 16px)";
   });
 }
@@ -326,15 +329,10 @@ function installTimelineResponsiveSizing(node, root, insets) {
     const target = Array.isArray(size) ? size : node.size || [0, 0];
     if (!host?.classList?.contains("dom-widget")) return;
     const rawWidth = num(target[0]);
-    const rawHeight = num(target[1]);
-    const width = Math.max(0, rawWidth);
-    const height = rawHeight < TIMELINE_MIN_NODE_HEIGHT ? TIMELINE_DEFAULT_HEIGHT : rawHeight;
-    if (Math.abs(num(node.size?.[1]) - height) > 0.5) node.setSize?.([width, height]);
+    const width = Math.max(TIMELINE_MIN_NODE_WIDTH, rawWidth || adaptiveTimelineDefaultWidth());
     const hostWidth = Math.max(0, width - insets.width);
     host.style.setProperty("--cine-timeline-host-width", `${hostWidth}px`);
-    host.style.width = `${hostWidth}px`;
-    host.style.height = `${Math.max(180, height - insets.height)}px`;
-    root.style.width = "calc(100% - 16px)";
+    root.style.width = "calc(var(--cine-timeline-host-width) - 16px)";
     root.style.height = "calc(100% - 16px)";
   };
   node.onResize = function (size) {
@@ -2453,8 +2451,8 @@ class CineTimelineWidget {
   }
 }
 
-if (!globalThis.__cineTimelineEditorV69) {
-  globalThis.__cineTimelineEditorV69 = true;
+if (!globalThis.__cineTimelineEditorV73) {
+  globalThis.__cineTimelineEditorV73 = true;
   app.registerExtension({
     name: "ComfyUI.CineTimeline.Editor.V69",
     setup() {
@@ -2502,13 +2500,20 @@ if (!globalThis.__cineTimelineEditorV69) {
         return;
       }
       // Repair old workflows whose optional widgets shifted position/name.
-      // Classify by value first, then assign the canonical names exactly once.
-      for (const widget of widgets) {
-        if (widget === sourceWidget) continue;
-        const value = String(widget?.value || "").trim();
-        if (/^SEGMENT_\d+$/i.test(value)) widget.name = "render_target_shot_id";
-        else if (/^[0-9a-f-]{24,}$/i.test(value)) widget.name = "render_run_id";
-        else if (["timeline_state", "render_target_shot_id", "render_run_id"].includes(widget.name)) {
+      // Preserve one canonical widget of each kind even when its value is empty;
+      // older logic renamed empty canonical widgets and created duplicates.
+      const otherWidgets = widgets.filter((widget) => widget !== sourceWidget);
+      let targetWidget = otherWidgets.find((widget) => /^SEGMENT_\d+$/i.test(String(widget?.value || "").trim()))
+        || otherWidgets.find((widget) => widget.name === "render_target_shot_id")
+        || null;
+      let runWidget = otherWidgets.find((widget) => /^[0-9a-f-]{24,}$/i.test(String(widget?.value || "").trim()))
+        || otherWidgets.find((widget) => widget.name === "render_run_id")
+        || null;
+      if (targetWidget) targetWidget.name = "render_target_shot_id";
+      if (runWidget) runWidget.name = "render_run_id";
+      for (const widget of otherWidgets) {
+        if (widget === targetWidget || widget === runWidget) continue;
+        if (["timeline_state", "render_target_shot_id", "render_run_id", "cine_legacy_hidden"].includes(widget.name)) {
           widget.name = "cine_legacy_hidden";
         }
       }
@@ -2541,9 +2546,11 @@ if (!globalThis.__cineTimelineEditorV69) {
         || node.addWidget?.("text", name, "", () => {}, { serialize: true })
         || null
       );
-      const targetWidget = ensureQueueWidget("render_target_shot_id");
-      const runWidget = ensureQueueWidget("render_run_id");
-      for (const widget of [targetWidget, runWidget]) {
+      targetWidget ||= ensureQueueWidget("render_target_shot_id");
+      runWidget ||= ensureQueueWidget("render_run_id");
+      for (const widget of node.widgets?.filter((item) => (
+        item === sourceWidget || item === targetWidget || item === runWidget || item.name === "cine_legacy_hidden"
+      )) || []) {
         if (!widget) continue;
         widget.hidden = true;
         widget.computeSize = () => [0, -3.3];
@@ -2553,10 +2560,11 @@ if (!globalThis.__cineTimelineEditorV69) {
       const properties = node.properties ?? (node.properties = {});
       const rawSize = node.size || [0, 0];
       const computedSize = node.computeSize?.() || rawSize;
-      const width = num(rawSize[0]) >= 560
-        ? num(rawSize[0])
+      const rawWidth = num(rawSize[0]);
+      const width = rawWidth >= TIMELINE_MIN_NODE_WIDTH && rawWidth <= TIMELINE_MAX_NODE_WIDTH
+        ? rawWidth
         : adaptiveTimelineDefaultWidth();
-      const height = num(rawSize[1]) < TIMELINE_MIN_NODE_HEIGHT || num(rawSize[1]) > 4000
+      const height = num(rawSize[1]) < TIMELINE_MIN_NODE_HEIGHT || num(rawSize[1]) > TIMELINE_MAX_NODE_HEIGHT
         ? TIMELINE_DEFAULT_HEIGHT
         : num(rawSize[1], TIMELINE_DEFAULT_HEIGHT);
       node._cineTimelineDesiredSize = [width, height];
@@ -2592,7 +2600,13 @@ if (!globalThis.__cineTimelineEditorV69) {
         const saved = Array.isArray(info?.size) ? [...info.size] : [...(this.size || [])];
         const savedVersion = num(info?.properties?.cineDefaultSizeVersion);
         const result = originalConfigure?.apply(this, arguments);
-        const needsMigration = savedVersion < TIMELINE_SIZE_LAYOUT_VERSION;
+        const invalidSavedSize = (
+          num(saved?.[0]) < TIMELINE_MIN_NODE_WIDTH ||
+          num(saved?.[0]) > TIMELINE_MAX_NODE_WIDTH ||
+          num(saved?.[1]) < TIMELINE_MIN_NODE_HEIGHT ||
+          num(saved?.[1]) > TIMELINE_MAX_NODE_HEIGHT
+        );
+        const needsMigration = savedVersion < TIMELINE_SIZE_LAYOUT_VERSION || invalidSavedSize;
         const restored = needsMigration
           ? [adaptiveTimelineDefaultWidth(), TIMELINE_DEFAULT_HEIGHT]
           : [num(saved?.[0]), num(saved?.[1])];

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import pathlib
 import sys
 import types
@@ -39,8 +40,35 @@ class PlanOnlyPluginTests(unittest.TestCase):
         result = nodes.CineTimelinePlan().build(model, nodes.DEFAULT_STUDIO_TIMELINE)
         self.assertIs(result[0], model)
         self.assertEqual(result[2], 120)
-        self.assertEqual(len(result), 5)
+        self.assertEqual(len(result), 6)
         self.assertIn('"schema":"cine_video_extension_plan"', result[4])
+        self.assertIn('"schema":"cine_reference_plan"', result[5])
+
+    def test_segment_reference_plan_filters_and_renumbers_images(self):
+        timeline = json.loads(nodes.DEFAULT_STUDIO_TIMELINE)
+        timeline["total_frames"] = 240
+        timeline["shots"] = [
+            {"shot_id": "S1", "start_frame": 0, "end_frame": 120,
+             "local_prompt": "use <Picture 1>", "camera": "", "transition": "cut",
+             "metadata": {"render": {"status": "empty", "active_version": "", "versions": []}}},
+            {"shot_id": "S2", "start_frame": 120, "end_frame": 240,
+             "local_prompt": "use <Picture 2>", "camera": "", "transition": "cut",
+             "metadata": {"render": {"status": "empty", "active_version": "", "versions": []}}},
+        ]
+        timeline["references"] = [
+            {"reference_id": "R1", "type": "character", "media_type": "image",
+             "image_index": 0, "start_frame": 0, "end_frame": 120, "strength": 1,
+             "priority": 0, "asset_id": "one.png"},
+            {"reference_id": "R2", "type": "character", "media_type": "image",
+             "image_index": 1, "start_frame": 120, "end_frame": 240, "strength": 1,
+             "priority": 0, "asset_id": "two.png"},
+        ]
+        result = nodes.CineTimelinePlan().build(
+            object(), json.dumps(timeline), json.dumps(timeline), "S2", "run-2"
+        )
+        self.assertEqual(json.loads(result[5])["image_slots"], [2])
+        self.assertIn("<Picture 1>", result[1])
+        self.assertNotIn("<Picture 2>", result[1])
 
 
 if __name__ == "__main__":

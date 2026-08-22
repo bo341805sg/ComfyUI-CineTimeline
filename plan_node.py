@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from .core import TimelineValidationError, normalize_timeline
+from .core import TimelineValidationError, active_references, normalize_timeline
 
 
 DEFAULT_STUDIO_TIMELINE = """{
@@ -49,10 +49,10 @@ class CineTimelinePlan:
             },
         }
 
-    RETURN_TYPES = ("MODEL", "STRING", "INT", "BOOLEAN", "STRING")
+    RETURN_TYPES = ("MODEL", "STRING", "INT", "BOOLEAN", "STRING", "STRING")
     RETURN_NAMES = (
         "model", "segment_prompt", "frame_count", "hq_refinement",
-        "video_extension_plan",
+        "video_extension_plan", "reference_plan_json",
     )
     FUNCTION = "build"
     CATEGORY = "CineTimeline"
@@ -151,8 +151,37 @@ class CineTimelinePlan:
             "shot_id": str(selected.get("shot_id", "")),
             "render_run_id": run_id,
         }
-        return model, segment_prompt, frame_count, hq_refinement, json.dumps(
-            extension_plan, ensure_ascii=False, separators=(",", ":")
+        selected_refs = [
+            ref for ref in active_references(
+                normalized, int(selected["start_frame"]), int(selected["end_frame"])
+            )
+            if ref.get("media_type") == "image" and ref.get("image_index") is not None
+        ]
+        # Preserve the editor's priority order, de-duplicate physical inputs,
+        # and remap the chosen images to consecutive H3 Picture ordinals.
+        image_slots = []
+        for ref in selected_refs:
+            slot = int(ref["image_index"]) + 1
+            if slot not in image_slots:
+                image_slots.append(slot)
+        if not image_slots:
+            mentioned = [int(value) for value in re.findall(r"<Picture\s+(\d+)>", segment_prompt)]
+            image_slots = sorted(set(mentioned))
+        ordinal_map = {source: target for target, source in enumerate(image_slots, 1)}
+        for source in sorted(ordinal_map, reverse=True):
+            segment_prompt = re.sub(
+                rf"<Picture\s+{source}>", f"<Picture {ordinal_map[source]}>", segment_prompt
+            )
+        reference_plan = {
+            "schema": "cine_reference_plan",
+            "shot_id": str(selected.get("shot_id", "")),
+            "image_slots": image_slots,
+            "ordinal_map": ordinal_map,
+        }
+        return (
+            model, segment_prompt, frame_count, hq_refinement,
+            json.dumps(extension_plan, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(reference_plan, ensure_ascii=False, separators=(",", ":")),
         )
 
 
