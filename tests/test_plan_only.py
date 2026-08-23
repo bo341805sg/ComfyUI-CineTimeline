@@ -40,9 +40,18 @@ class PlanOnlyPluginTests(unittest.TestCase):
         result = nodes.CineTimelinePlan().build(model, nodes.DEFAULT_STUDIO_TIMELINE)
         self.assertIs(result[0], model)
         self.assertEqual(result[2], 120)
-        self.assertEqual(len(result), 6)
+        self.assertEqual(len(result), 7)
+        self.assertFalse(result[3])
         self.assertIn('"schema":"cine_video_extension_plan"', result[4])
         self.assertIn('"schema":"cine_reference_plan"', result[5])
+        self.assertFalse(result[6])
+
+    def test_single_pass_is_an_explicit_route_separate_from_hq(self):
+        timeline = json.loads(nodes.DEFAULT_STUDIO_TIMELINE)
+        timeline["shots"][0]["metadata"]["postprocess_mode"] = "single_pass"
+        result = nodes.CineTimelinePlan().build(object(), json.dumps(timeline))
+        self.assertFalse(result[3])
+        self.assertTrue(result[6])
 
     def test_segment_reference_plan_filters_and_renumbers_images(self):
         timeline = json.loads(nodes.DEFAULT_STUDIO_TIMELINE)

@@ -52,7 +52,8 @@ def _ffmpeg_executable() -> str:
 
 
 def _normalize_saved_video_audio(path: Path) -> Path:
-    """Create a normalized companion file without touching SaveVideo's locked output."""
+    """Normalize through a temporary file, then atomically replace the saved video."""
+    path = Path(path)
     destination = path.with_name(f"{path.stem}_normalized_{uuid.uuid4().hex[:8]}{path.suffix}")
     process = subprocess.run(
         [
@@ -73,7 +74,12 @@ def _normalize_saved_video_audio(path: Path) -> Path:
         destination.unlink(missing_ok=True)
         detail = (process.stderr or process.stdout or "FFmpeg 响度归一化失败").strip()
         raise RuntimeError(detail[-1000:])
-    return destination
+    try:
+        os.replace(destination, path)
+    except OSError:
+        destination.unlink(missing_ok=True)
+        raise
+    return path
 
 
 @PromptServer.instance.routes.post("/cine_timeline/normalize_audio")

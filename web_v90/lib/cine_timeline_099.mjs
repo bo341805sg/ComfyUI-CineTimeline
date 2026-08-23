@@ -4,7 +4,7 @@ import { languageSelect, localizeDom, onLocaleChange, tr } from "./cine_i18n_099
 
 console.info("[CineTimeline] v0.11.0 dialogue validation routing loaded");
 
-const TIMELINE_LAYOUT_VERSION = 64;
+const TIMELINE_LAYOUT_VERSION = 65;
 const TIMELINE_SIZE_LAYOUT_VERSION = 7;
 const TIMELINE_DEFAULT_HEIGHT = 920;
 const TIMELINE_MIN_NODE_HEIGHT = 720;
@@ -242,7 +242,10 @@ async function handleSavedTimelineVideo({ detail }) {
   if (renderContext?.targetId) {
     let normalizedSaved = saved;
     const asset = editor?.savedAsset?.(saved);
-    if (asset?.asset_id) {
+    // The normalized save node already performs loudness correction in the
+    // backend. Keep this request only as a compatibility fallback for older
+    // workflows that still use ComfyUI's native SaveVideo node.
+    if (asset?.asset_id && className !== "CineSaveNormalizedVideo") {
       const response = await api.fetchApi("/cine_timeline/normalize_audio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -275,7 +278,7 @@ async function handleSavedTimelineVideo({ detail }) {
 function handleTimelineExecutionFailure({ detail }) {
   const reason = String(detail?.exception_message || detail?.message || detail?.error || "执行中断");
   for (const node of app.graph?._nodes || []) {
-    node?.cineTimelineEditor?.handleAutoAssemblyFailure?.(reason);
+    node?.cineTimelineEditor?.handleExecutionFailure?.(reason);
   }
 }
 
@@ -435,7 +438,7 @@ class CineTimelineWidget {
     this.status = el("div", "cine-status");
     this.root.append(this.toolbar, this.main, this.inspector, this.status);
 
-    this.reloadState();
+    const timelineReady = this.reloadState();
     // Queue scope is runtime-only. A browser/server restart cannot resume the
     // old callback, so persisted values would permanently block new renders.
     if (this.state?.metadata) {
@@ -444,12 +447,72 @@ class CineTimelineWidget {
     }
     if (this.targetWidget) this.targetWidget.value = "";
     if (this.runWidget) this.runWidget.value = "";
-    this.sync();
+    if (timelineReady) this.sync();
   }
 
   reloadState() {
     try {
-      this.state = JSON.parse(this.sourceWidget.value || "{}");
+      // Widget names and object identities can shift while ComfyUI restores an
+      // older workflow. Resolve the canonical state from its content on every
+      // reload so a segment/run token can never be parsed as timeline JSON.
+      let canonicalSource = (this.node?.widgets || []).find((widget) => {
+        try {
+          const value = JSON.parse(String(widget?.value || ""));
+          return value && typeof value === "object" && Array.isArray(value.shots);
+        } catch {
+          return false;
+        }
+      });
+      if (!canonicalSource) {
+        const backup = String(this.node?.properties?.cineTimelineStateBackup || "");
+        let backupState = null;
+        try {
+          const candidate = JSON.parse(backup);
+          if (candidate && typeof candidate === "object" && Array.isArray(candidate.shots)) {
+            backupState = candidate;
+          }
+        } catch {}
+        if (backupState) {
+          canonicalSource = (this.node?.widgets || []).find((widget) => widget.name === "timeline_state") || null;
+          if (!canonicalSource) {
+            canonicalSource = this.node?.addWidget?.(
+              "text", "timeline_state", backup, () => {}, { serialize: true },
+            ) || null;
+          }
+          if (canonicalSource) canonicalSource.value = backup;
+        }
+      }
+      if (!canonicalSource) {
+        // ComfyUI restores widget values asynchronously. At this point the
+        // saved timeline widget may not exist yet and sourceWidget can point
+        // at a numeric/queue widget. Do not parse or write through that stale
+        // reference; wait for the canonical JSON widget to become available.
+        this.state ??= JSON.parse(EMPTY_TIMELINE_STATE);
+        this.toolbar.replaceChildren(el("div", "cine-title", "CineTimeline · 正在恢复数据…"));
+        this.main.replaceChildren();
+        this.inspector.replaceChildren();
+        this.status.replaceChildren();
+
+        const attempt = Number(this._timelineRestoreAttempts || 0);
+        if (attempt < 6 && !this._timelineRestoreRetryTimer) {
+          const delays = [0, 50, 250, 1000, 2000, 4000];
+          this._timelineRestoreRetryTimer = setTimeout(() => {
+            this._timelineRestoreRetryTimer = 0;
+            this._timelineRestoreAttempts = attempt + 1;
+            this.reloadState();
+          }, delays[attempt]);
+        }
+        return false;
+      }
+
+      if (this._timelineRestoreRetryTimer) clearTimeout(this._timelineRestoreRetryTimer);
+      this._timelineRestoreRetryTimer = 0;
+      this._timelineRestoreAttempts = 0;
+      this.sourceWidget = canonicalSource;
+      canonicalSource.name = "timeline_state";
+      this.state = JSON.parse(String(canonicalSource.value));
+      this.node.properties ??= {};
+      this.node.properties.cineTimelineStateBackup = JSON.stringify(this.state);
       this.state.metadata = this.state.metadata && typeof this.state.metadata === "object"
         ? this.state.metadata
         : {};
@@ -492,10 +555,14 @@ class CineTimelineWidget {
           : null;
       this.sourceWidget.value = JSON.stringify(this.state, null, 2);
       this.render();
+      return true;
     } catch (error) {
       this.state = null;
       this.toolbar.replaceChildren(el("div", "cine-title", "CineTimeline · 数据解析失败"));
       this.main.replaceChildren(el("div", "cine-empty", String(error.message || error)));
+      this.inspector.replaceChildren();
+      this.status.replaceChildren();
+      return false;
     }
   }
 
@@ -670,12 +737,14 @@ class CineTimelineWidget {
     this.sync();
     if (continueAssembly) setTimeout(async () => {
       try {
-        this.transientMessage = `${targetShot.shot_id} 已保存，正在释放上一段模型与显存…`;
+        this.transientMessage = `${targetShot.shot_id} 已保存，正在清理上一段临时显存…`;
         this.render();
         await api.fetchApi("/free", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ unload_models: true, free_memory: true }),
+          // H3 quantized weights must remain registered between segments.
+          // Full unload/reload can corrupt AIMDO HostBuffer state on Windows.
+          body: JSON.stringify({ unload_models: false, free_memory: true }),
         });
         await new Promise((resolve) => setTimeout(resolve, 1200));
       } catch (error) {
@@ -728,6 +797,27 @@ class CineTimelineWidget {
       ? "完整影片串联"
       : this.autoAssemblyShotId || "片段补全";
     this.stopAutoAssembly(`自动补全已停止：${stageLabel} 执行失败（${reason}）`);
+  }
+
+  handleExecutionFailure(reason) {
+    if (this.autoAssemblyActive) {
+      this.handleAutoAssemblyFailure(reason);
+      return;
+    }
+    const targetId = String(this.state?.metadata?.render_target_shot_id || "").trim();
+    const runId = String(this.state?.metadata?.render_run_id || "").trim();
+    if (!targetId && !runId) return;
+    const shot = this.state?.shots?.find((item) => item.shot_id === targetId);
+    if (shot) {
+      const render = this.ensureShotRenderMetadata(shot);
+      render.status = render.versions.length ? "generated" : "empty";
+    }
+    delete this.state.metadata.render_target_shot_id;
+    delete this.state.metadata.render_run_id;
+    if (this.targetWidget) this.targetWidget.value = "";
+    if (this.runWidget) this.runWidget.value = "";
+    this.transientMessage = `${targetId || "当前片段"} 的任务已中止，运行锁已释放，可以重新生成（${reason}）`;
+    this.sync();
   }
 
   ensureReferenceMetadata() {
@@ -853,6 +943,8 @@ class CineTimelineWidget {
   sync(render = true) {
     this.normalizeShotSchedule(false);
     this.sourceWidget.value = JSON.stringify(this.state, null, 2);
+    this.node.properties ??= {};
+    this.node.properties.cineTimelineStateBackup = JSON.stringify(this.state);
     try {
       this.sourceWidget.callback?.(this.sourceWidget.value);
     } catch (error) {
@@ -1879,6 +1971,9 @@ class CineTimelineWidget {
     if (settings.getSettingValue("VHS.LatentPreview") !== true) {
       await settings.setSettingValue("VHS.LatentPreview", true);
     }
+    if (settings.getSettingValue("VHS.KeepIntermediate") !== false) {
+      await settings.setSettingValue("VHS.KeepIntermediate", false);
+    }
   }
 
   assemblyReadiness() {
@@ -2443,11 +2538,182 @@ class CineTimelineWidget {
   }
 }
 
-if (!globalThis.__cineTimelineEditorV90) {
-  globalThis.__cineTimelineEditorV90 = true;
+function isH3GenerationSubgraphNode(node) {
+  const title = String(node?.title || node?.constructor?.title || "");
+  return title.includes("H3 分段生成") || String(node?.type || "") === "c53aef76-a816-4c89-9f7d-88cc7fe75be8";
+}
+
+function moveH3LatentPreviewToBottom(node) {
+  const widgets = Array.isArray(node?.widgets) ? node.widgets : [];
+  const previewWidgets = widgets.filter((item) => item?.name === "vhslatentpreview");
+  if (!previewWidgets.length) return false;
+  const alreadyLast = widgets.slice(-previewWidgets.length).every((item, index) => item === previewWidgets[index]);
+  if (!alreadyLast) {
+    node.widgets = [
+      ...widgets.filter((item) => item?.name !== "vhslatentpreview"),
+      ...previewWidgets,
+    ];
+  }
+  for (const previewWidget of previewWidgets) {
+    const canvas = previewWidget?.element;
+    const host = canvas?.closest?.(".dom-widget") || canvas?.parentElement;
+    if (host?.parentElement && host !== host.parentElement.lastElementChild) {
+      host.parentElement.appendChild(host);
+    }
+  }
+  node._cineLatentPreviewAtBottom = true;
+  return true;
+}
+
+function fitH3LatentPreview(node) {
+  moveH3LatentPreviewToBottom(node);
+  const previewWidgets = (node.widgets || []).filter((item) => item?.name === "vhslatentpreview");
+  const widget = previewWidgets.at(-1);
+  for (const staleWidget of previewWidgets.slice(0, -1)) {
+    const staleCanvas = staleWidget?.element;
+    const staleHost = staleCanvas?.closest?.(".dom-widget") || staleCanvas?.parentElement;
+    if (staleCanvas) {
+      staleCanvas.dataset.cineLatentPreviewHidden = "true";
+      staleCanvas.style.setProperty("display", "none", "important");
+    }
+    if (staleHost) staleHost.style.setProperty("display", "none", "important");
+    staleWidget.computeSize = (width) => [width, 0];
+    staleWidget.computedHeight = 0;
+  }
+  const canvas = widget?.element;
+  const ratio = num(widget?.aspectRatio || (canvas?.width && canvas?.height ? canvas.width / canvas.height : 0));
+  if (!widget || !canvas || !(ratio > 0)) return false;
+
+  // ComfyUI may also paint the same transient frame through node.imgs. On a
+  // subgraph node that becomes a second 30px strip above the VHS DOM preview.
+  // The VHS widget is the single canonical live preview for this node.
+  if (Array.isArray(node.imgs) && node.imgs.length) node.imgs = [];
+  if (node.preview) node.preview = null;
+
+  const nodeWidth = Math.max(240, num(node.size?.[0], 360));
+  const availableWidth = Math.max(180, nodeWidth - 24);
+  const previewHeight = Math.round(clamp(availableWidth / ratio, 96, 360));
+  const previewWidth = Math.round(previewHeight * ratio);
+  const host = canvas.closest?.(".dom-widget") || canvas.parentElement;
+
+  delete canvas.dataset.cineLatentPreviewHidden;
+  canvas.style.setProperty("display", "block", "important");
+  canvas.style.setProperty("width", `${Math.min(availableWidth, previewWidth)}px`, "important");
+  canvas.style.setProperty("height", `${previewHeight}px`, "important");
+  canvas.style.setProperty("max-width", "100%", "important");
+  canvas.style.setProperty("margin", "0 auto", "important");
+  canvas.style.setProperty("object-fit", "contain", "important");
+  canvas.style.setProperty("background", "#090b0f", "important");
+  if (host) {
+    host.style.setProperty("display", "flex", "important");
+    host.style.setProperty("align-items", "center", "important");
+    host.style.setProperty("justify-content", "center", "important");
+    host.style.setProperty("height", `${previewHeight + 8}px`, "important");
+    host.style.setProperty("min-height", `${previewHeight + 8}px`, "important");
+    host.style.setProperty("max-height", `${previewHeight + 8}px`, "important");
+    host.style.setProperty("overflow", "hidden", "important");
+  }
+
+  widget.computeSize = (width) => [width, previewHeight + 8];
+  widget.computedHeight = previewHeight + 8;
+  node._cineLatentPreviewBaseHeight ??= Math.max(120, num(node.size?.[1], 304) - 30);
+  const targetHeight = Math.max(
+    num(node.size?.[1]),
+    node._cineLatentPreviewBaseHeight + previewHeight + 12,
+  );
+  if (Math.abs(num(node.size?.[1]) - targetHeight) > 1) node.setSize?.([nodeWidth, targetHeight]);
+  node.graph?.setDirtyCanvas?.(true, true);
+  return true;
+}
+
+function fitVisibleLatentPreviewCanvases() {
+  for (const canvas of document.querySelectorAll(".dom-widget > canvas.h-full.w-full")) {
+    if (canvas.dataset.cineLatentPreviewHidden === "true") continue;
+    const intrinsicWidth = num(canvas.width);
+    const intrinsicHeight = num(canvas.height);
+    const host = canvas.parentElement;
+    if (!(intrinsicWidth > 0 && intrinsicHeight > 0) || !host) continue;
+    // VHS latent previews are born as a 30px-tall canvas in Nodes 2.0.
+    // Leave ordinary image/video canvas widgets alone.
+    if (num(host.getBoundingClientRect?.().height, num(host.style.height)) > 48 && !canvas.dataset.cineLatentPreview) continue;
+    const ratio = intrinsicWidth / intrinsicHeight;
+    const availableWidth = Math.max(180, Number.parseFloat(host.style.width) || 340);
+    const previewHeight = Math.round(clamp(availableWidth / ratio, 96, 360));
+    const previewWidth = Math.round(previewHeight * ratio);
+    canvas.dataset.cineLatentPreview = "true";
+    canvas.style.setProperty("display", "block", "important");
+    canvas.style.setProperty("width", `${Math.min(availableWidth, previewWidth)}px`, "important");
+    canvas.style.setProperty("height", `${previewHeight}px`, "important");
+    canvas.style.setProperty("max-width", "100%", "important");
+    canvas.style.setProperty("margin", "0 auto", "important");
+    canvas.style.setProperty("object-fit", "contain", "important");
+    canvas.style.setProperty("background", "#090b0f", "important");
+    host.style.setProperty("display", "flex", "important");
+    host.style.setProperty("align-items", "center", "important");
+    host.style.setProperty("justify-content", "center", "important");
+    host.style.setProperty("height", `${previewHeight + 8}px`, "important");
+    host.style.setProperty("min-height", `${previewHeight + 8}px`, "important");
+    host.style.setProperty("max-height", `${previewHeight + 8}px`, "important");
+    host.style.setProperty("overflow", "hidden", "important");
+  }
+}
+
+function fitAllLatentPreviewWidgets() {
+  const graphs = [app.graph, ...(app.graph?.subgraphs?.values?.() || [])];
+  for (const graph of graphs) {
+    for (const node of graph?._nodes || []) {
+      if (node.widgets?.some((item) => item?.name === "vhslatentpreview")) fitH3LatentPreview(node);
+    }
+  }
+}
+
+function scheduleH3LatentPreviewFit(event) {
+  const outerId = String(event?.detail?.id || "").split(":")[0];
+  const candidates = new Set([
+    graphNode(outerId),
+    ...(app.graph?._nodes || []).filter(isH3GenerationSubgraphNode),
+  ]);
+  for (const node of candidates) {
+    if (!isH3GenerationSubgraphNode(node)) continue;
+    let attempts = 0;
+    const timer = setInterval(() => {
+      attempts += 1;
+      if (fitH3LatentPreview(node) || attempts >= 100) clearInterval(timer);
+    }, 100);
+  }
+}
+
+function stabilizeH3PreviewCanvases() {
+  // VHS owns latent preview layout. CineTimeline intentionally does not
+  // resize the subgraph node or its promoted widgets.
+}
+
+function installH3LatentPreviewListener() {
+  if (globalThis.__cineTimelineVhsPreviewHandler) {
+    api.removeEventListener?.("VHS_latentpreview", globalThis.__cineTimelineVhsPreviewHandler);
+  }
+  globalThis.__cineTimelineVhsPreviewHandler = null;
+  if (globalThis.__cineTimelineLatentPreviewTimer) clearInterval(globalThis.__cineTimelineLatentPreviewTimer);
+  globalThis.__cineTimelineLatentPreviewTimer = null;
+  globalThis.__cineTimelineStablePreviewObserver?.disconnect?.();
+  globalThis.__cineTimelineStablePreviewObserver = null;
+}
+
+// Register immediately as well as from setup. Some ComfyUI frontend builds
+// load extension modules after their setup pass, while VHS may begin emitting
+// preview events as soon as a queued prompt is accepted.
+installH3LatentPreviewListener();
+
+if (!globalThis.__cineTimelineEditorV93) {
+  globalThis.__cineTimelineEditorV93 = true;
   app.registerExtension({
-    name: "ComfyUI.CineTimeline.Editor.V90",
+    name: "ComfyUI.CineTimeline.Editor.V93",
     setup() {
+      // H3 two-pass workflows hold several large frame/latent tensors at once.
+      // Keeping VHS intermediates across stages can exhaust host/GPU memory and
+      // leave the executor waiting forever during the final decode.
+      app.graph.extra ??= {};
+      app.graph.extra.VHS_KeepIntermediate = false;
       if (globalThis.__cineTimelineButtonCaptureHandler) {
         document.removeEventListener("click", globalThis.__cineTimelineButtonCaptureHandler, true);
       }
@@ -2464,6 +2730,7 @@ if (!globalThis.__cineTimelineEditorV90) {
       api.addEventListener("executed", handleSavedTimelineVideo);
       api.addEventListener("execution_error", handleTimelineExecutionFailure);
       api.addEventListener("execution_interrupted", handleTimelineExecutionFailure);
+      installH3LatentPreviewListener();
     },
     async nodeCreated(node) {
       const className = node.comfyClass || node.type;
@@ -2485,7 +2752,15 @@ if (!globalThis.__cineTimelineEditorV90) {
         ? namedSourceWidget
         : widgets.find(isTimelineStateWidget) || null;
       if (!sourceWidget) {
-        sourceWidget = node.addWidget?.("text", "timeline_state", EMPTY_TIMELINE_STATE, () => {}, { serialize: true }) || null;
+        const propertyBackup = String(node.properties?.cineTimelineStateBackup || "");
+        let initialState = EMPTY_TIMELINE_STATE;
+        try {
+          const candidate = JSON.parse(propertyBackup);
+          if (candidate && typeof candidate === "object" && Array.isArray(candidate.shots)) {
+            initialState = propertyBackup;
+          }
+        } catch {}
+        sourceWidget = node.addWidget?.("text", "timeline_state", initialState, () => {}, { serialize: true }) || null;
       }
       if (!sourceWidget) {
         console.warn("[CineTimeline] timeline_state widget not found");
@@ -2607,6 +2882,35 @@ if (!globalThis.__cineTimelineEditorV90) {
         this.properties.cineDefaultSizeVersion = TIMELINE_SIZE_LAYOUT_VERSION;
         const applyConfiguredSize = () => {
           restoreTimelineNodeSize(this, restored);
+          const editor = this.cineTimelineEditor;
+          if (editor) {
+            const widgets = this.widgets || [];
+            const isTimelineState = (widget) => {
+              try {
+                const value = JSON.parse(String(widget?.value || ""));
+                return value && typeof value === "object" && Array.isArray(value.shots);
+              } catch {
+                return false;
+              }
+            };
+            // ComfyUI may apply saved widget values after nodeCreated. Rebind
+            // by value instead of trusting the earlier positional widget map.
+            const source = widgets.find(isTimelineState);
+            const target = widgets.find((widget) => /^SEGMENT_\d+$/i.test(String(widget?.value || "").trim()));
+            const run = widgets.find((widget) => /^[0-9a-f-]{24,}$/i.test(String(widget?.value || "").trim()));
+            if (source) {
+              editor.sourceWidget = source;
+              source.name = "timeline_state";
+            }
+            if (target) {
+              editor.targetWidget = target;
+              target.name = "render_target_shot_id";
+            }
+            if (run) {
+              editor.runWidget = run;
+              run.name = "render_run_id";
+            }
+          }
           this.cineTimelineEditor?.reloadState();
         };
         applyConfiguredSize();

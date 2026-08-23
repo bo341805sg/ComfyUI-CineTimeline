@@ -37,9 +37,11 @@ class CineTimelinePlan:
         return {
             "required": {
                 "model": ("MODEL",),
-                "timeline_json": ("STRING", {"forceInput": True}),
             },
             "optional": {
+                # AIPM can provide this package, but the timeline editor must
+                # remain executable on its own when users author shots by hand.
+                "timeline_json": ("STRING", {"forceInput": True}),
                 "timeline_state": (
                     "STRING",
                     {"default": DEFAULT_STUDIO_TIMELINE, "multiline": True, "dynamicPrompts": False},
@@ -49,10 +51,10 @@ class CineTimelinePlan:
             },
         }
 
-    RETURN_TYPES = ("MODEL", "STRING", "INT", "BOOLEAN", "STRING", "STRING")
+    RETURN_TYPES = ("MODEL", "STRING", "INT", "BOOLEAN", "STRING", "STRING", "BOOLEAN")
     RETURN_NAMES = (
         "model", "segment_prompt", "frame_count", "hq_refinement",
-        "video_extension_plan", "reference_plan_json",
+        "video_extension_plan", "reference_plan_json", "single_pass",
     )
     FUNCTION = "build"
     CATEGORY = "CineTimeline"
@@ -60,7 +62,7 @@ class CineTimelinePlan:
     def build(
         self,
         model: Any,
-        timeline_json: str,
+        timeline_json: str = "",
         timeline_state: str = "",
         render_target_shot_id: str = "",
         render_run_id: str = "",
@@ -132,6 +134,7 @@ class CineTimelinePlan:
             frame_count = lower if target - lower <= upper - target else upper
         postprocess_mode = str(selected.get("metadata", {}).get("postprocess_mode", "rtx_vsr"))
         hq_refinement = postprocess_mode == "hq_latent"
+        single_pass = postprocess_mode == "single_pass"
         safe_shot = re.sub(
             r"[^a-zA-Z0-9_-]+", "_", str(selected.get("shot_id", "segment"))
         ).strip("_") or "segment"
@@ -182,6 +185,7 @@ class CineTimelinePlan:
             model, segment_prompt, frame_count, hq_refinement,
             json.dumps(extension_plan, ensure_ascii=False, separators=(",", ":")),
             json.dumps(reference_plan, ensure_ascii=False, separators=(",", ":")),
+            single_pass,
         )
 
 
