@@ -29,10 +29,16 @@ nodes = load_nodes()
 
 class PlanOnlyPluginTests(unittest.TestCase):
     def test_only_cine_timeline_plan_is_registered(self):
-        self.assertEqual(set(nodes.NODE_CLASS_MAPPINGS), {"CineTimelinePlan"})
+        self.assertEqual(
+            set(nodes.NODE_CLASS_MAPPINGS),
+            {"CineTimelinePlan", "CineTimelineVideoExtensionPlan"},
+        )
         self.assertEqual(
             nodes.NODE_DISPLAY_NAME_MAPPINGS,
-            {"CineTimelinePlan": "CineTimeline Plan"},
+            {
+                "CineTimelinePlan": "CineTimeline Plan",
+                "CineTimelineVideoExtensionPlan": "CineTimeline Video Extension Plan",
+            },
         )
 
     def test_plan_still_normalizes_and_packages_timeline(self):

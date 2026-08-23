@@ -189,5 +189,48 @@ class CineTimelinePlan:
         )
 
 
-NODE_CLASS_MAPPINGS = {"CineTimelinePlan": CineTimelinePlan}
-NODE_DISPLAY_NAME_MAPPINGS = {"CineTimelinePlan": "CineTimeline Plan"}
+class CineTimelineVideoExtensionPlan:
+    """Expose the validated continuation fields to native Motion Context nodes."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"video_extension_plan": ("STRING", {"forceInput": True})}}
+
+    RETURN_TYPES = ("BOOLEAN", "STRING", "STRING", "INT", "INT", "INT")
+    RETURN_NAMES = (
+        "enabled", "source_latent_path", "context_length",
+        "audio_context_length", "requested_frame_count", "trim_frames",
+    )
+    FUNCTION = "parse"
+    CATEGORY = "CineTimeline"
+
+    def parse(self, video_extension_plan: str):
+        try:
+            plan = json.loads(str(video_extension_plan or "{}"))
+        except json.JSONDecodeError as exc:
+            raise TimelineValidationError(f"invalid video extension plan: {exc}") from exc
+        if plan.get("schema") != "cine_video_extension_plan":
+            raise TimelineValidationError("invalid video extension plan schema")
+        enabled = bool(plan.get("enabled", False))
+        path = str(plan.get("source_latent_path", "") or "").strip()
+        if enabled and not path:
+            raise TimelineValidationError("video extension plan has no source AV latent")
+        context_length = int(plan.get("context_length", 22)) if enabled else 0
+        return (
+            enabled,
+            path,
+            str(context_length or 22),
+            int(plan.get("audio_context_length", 24)),
+            int(plan.get("requested_frame_count", 0)),
+            context_length,
+        )
+
+
+NODE_CLASS_MAPPINGS = {
+    "CineTimelinePlan": CineTimelinePlan,
+    "CineTimelineVideoExtensionPlan": CineTimelineVideoExtensionPlan,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "CineTimelinePlan": "CineTimeline Plan",
+    "CineTimelineVideoExtensionPlan": "CineTimeline Video Extension Plan",
+}

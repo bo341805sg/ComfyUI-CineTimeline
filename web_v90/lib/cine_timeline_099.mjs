@@ -2045,9 +2045,28 @@ class CineTimelineWidget {
     const activeTargetId = String(this.state?.metadata?.render_target_shot_id || "").trim();
     const activeRunId = String(this.state?.metadata?.render_run_id || "").trim();
     if (activeTargetId && activeRunId) {
-      this.transientMessage = `${activeTargetId} 已在生成队列中，请等待当前任务完成`;
-      this.render();
-      return false;
+      // A stopped task or browser/server restart can leave the serialized
+      // target/run pair behind. Only treat it as a lock while ComfyUI really
+      // has work queued; otherwise release it and allow an immediate retry.
+      let queueBusy = false;
+      try {
+        const response = await fetch("/queue", { cache: "no-store" });
+        const queue = response.ok ? await response.json() : null;
+        queueBusy = Boolean(queue?.queue_running?.length || queue?.queue_pending?.length);
+      } catch {
+        // If queue state cannot be checked, preserve the lock rather than
+        // accidentally scheduling a duplicate long-running generation.
+        queueBusy = true;
+      }
+      if (queueBusy) {
+        this.transientMessage = `${activeTargetId} 已在生成队列中，请等待当前任务完成`;
+        this.render();
+        return false;
+      }
+      delete this.state.metadata.render_target_shot_id;
+      delete this.state.metadata.render_run_id;
+      if (this.targetWidget) this.targetWidget.value = "";
+      if (this.runWidget) this.runWidget.value = "";
     }
     const usage = this.referenceUsage(shot);
     if (!usage.valid) {
@@ -2080,7 +2099,10 @@ class CineTimelineWidget {
     this.transientMessage = `正在把 ${shot.shot_id} 加入单片段生成队列…`;
     this.sync();
     try {
-      const saveNode = this.findOutputNode("CineSaveSegmentVideo") || this.findOutputNode("SaveVideo") || this.findDownstreamVideoBranch();
+      const saveNode = this.findOutputNode("CineSaveNormalizedVideo")
+        || this.findOutputNode("CineSaveSegmentVideo")
+        || this.findOutputNode("SaveVideo")
+        || this.findDownstreamVideoBranch();
       if (!saveNode) throw new Error("工作流缺少 SaveVideo 节点");
       const validator = this.findOutputNode("CineH3DialogueValidator");
       const targets = [saveNode, validator].filter(Boolean);
