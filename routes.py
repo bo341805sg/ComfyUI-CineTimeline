@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import uuid
@@ -51,17 +52,50 @@ def _ffmpeg_executable() -> str:
     return executable
 
 
+def _measure_integrated_loudness(path: Path) -> float:
+    """Return the final EBU R128 integrated loudness reported by FFmpeg."""
+    process = subprocess.run(
+        [
+            _ffmpeg_executable(), "-hide_banner", "-nostats",
+            "-i", str(path), "-map", "0:a:0",
+            "-af", "ebur128=framelog=quiet", "-f", "null", "-",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    matches = re.findall(r"\bI:\s*(-?\d+(?:\.\d+)?)\s+LUFS", process.stderr or "")
+    if process.returncode != 0 or not matches:
+        detail = (process.stderr or process.stdout or "无法测量音频响度").strip()
+        raise RuntimeError(detail[-1000:])
+    return float(matches[-1])
+
+
+def _adaptive_loudness_target(input_lufs: float, desired_lufs: float = -16.0,
+                              max_gain_db: float = 10.0) -> float:
+    """Reach the normal target only when doing so needs no more than max_gain_db."""
+    return max(-70.0, min(-5.0, desired_lufs, input_lufs + max_gain_db))
+
+
 def _normalize_saved_video_audio(path: Path) -> Path:
-    """Normalize through a temporary file, then atomically replace the saved video."""
+    """Denoise lightly, cap upward gain, then atomically replace the saved video."""
     path = Path(path)
+    input_lufs = _measure_integrated_loudness(path)
+    target_lufs = _adaptive_loudness_target(input_lufs)
     destination = path.with_name(f"{path.stem}_normalized_{uuid.uuid4().hex[:8]}{path.suffix}")
+    audio_filter = (
+        "highpass=f=55,"
+        "afftdn=nr=6:nf=-40:tn=1,"
+        f"loudnorm=I={target_lufs:.1f}:TP=-1.5:LRA=11"
+    )
     process = subprocess.run(
         [
             _ffmpeg_executable(), "-hide_banner", "-loglevel", "error", "-y",
             "-i", str(path),
             "-map", "0:v:0", "-map", "0:a:0?",
             "-c:v", "copy",
-            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-af", audio_filter,
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart", str(destination),
         ],
