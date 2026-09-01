@@ -439,15 +439,23 @@ class CineTimelineWidget {
     this.root.append(this.toolbar, this.main, this.inspector, this.status);
 
     const timelineReady = this.reloadState();
-    // Queue scope is runtime-only. A browser/server restart cannot resume the
-    // old callback, so persisted values would permanently block new renders.
-    if (this.state?.metadata) {
+    const persistedAssembly = this.state?.metadata?.auto_assembly;
+    if (persistedAssembly?.active) {
+      this.autoAssemblyActive = true;
+      this.autoAssemblyStage = String(persistedAssembly.stage || "checking");
+      this.autoAssemblyShotId = String(persistedAssembly.shot_id || "");
+    } else if (this.state?.metadata) {
+      // A standalone render cannot be resumed safely after a reload. Automatic
+      // assembly carries an explicit marker and is recovered below.
       delete this.state.metadata.render_target_shot_id;
       delete this.state.metadata.render_run_id;
+      if (this.targetWidget) this.targetWidget.value = "";
+      if (this.runWidget) this.runWidget.value = "";
     }
-    if (this.targetWidget) this.targetWidget.value = "";
-    if (this.runWidget) this.runWidget.value = "";
-    if (timelineReady) this.sync();
+    if (timelineReady) {
+      this.sync(true, false);
+      if (this.autoAssemblyActive) setTimeout(() => this.recoverAutoAssembly(), 0);
+    }
   }
 
   reloadState() {
@@ -516,10 +524,12 @@ class CineTimelineWidget {
       this.state.metadata = this.state.metadata && typeof this.state.metadata === "object"
         ? this.state.metadata
         : {};
-      delete this.state.metadata.render_target_shot_id;
-      delete this.state.metadata.render_run_id;
-      if (this.targetWidget) this.targetWidget.value = "";
-      if (this.runWidget) this.runWidget.value = "";
+      if (!this.state.metadata.auto_assembly?.active) {
+        delete this.state.metadata.render_target_shot_id;
+        delete this.state.metadata.render_run_id;
+        if (this.targetWidget) this.targetWidget.value = "";
+        if (this.runWidget) this.runWidget.value = "";
+      }
       this.state.fps = FIXED_FPS;
       for (const key of ["shots", "references", "audio", "subtitles"]) {
         this.state[key] = Array.isArray(this.state[key]) ? this.state[key] : [];
@@ -730,6 +740,7 @@ class CineTimelineWidget {
     if (continueAssembly) {
       this.autoAssemblyStage = "checking";
       this.autoAssemblyShotId = "";
+      this.persistAutoAssembly();
       this.transientMessage = `${targetShot.shot_id} 已补全，正在检查下一片段…`;
     } else {
       this.transientMessage = `已把 ${targetShot.shot_id} 的新结果登记到视频轨；完整影片需要重新串联`;
@@ -772,6 +783,7 @@ class CineTimelineWidget {
     this.autoAssemblyActive = false;
     this.autoAssemblyStage = "idle";
     this.autoAssemblyShotId = "";
+    delete this.state.metadata.auto_assembly;
     this.transientMessage = `已串联并保存 ${this.state.shots.length} 个片段的完整影片`;
     this.sync();
   }
@@ -787,8 +799,65 @@ class CineTimelineWidget {
     delete this.state?.metadata?.render_run_id;
     if (this.targetWidget) this.targetWidget.value = "";
     if (this.runWidget) this.runWidget.value = "";
+    if (this.state?.metadata) delete this.state.metadata.auto_assembly;
     this.transientMessage = message;
     this.sync();
+  }
+
+  persistAutoAssembly() {
+    this.state.metadata ??= {};
+    if (!this.autoAssemblyActive) {
+      delete this.state.metadata.auto_assembly;
+      return;
+    }
+    this.state.metadata.auto_assembly = {
+      active: true,
+      stage: this.autoAssemblyStage,
+      shot_id: this.autoAssemblyShotId,
+      updated_at: new Date().toISOString(),
+    };
+  }
+
+  async recoverAutoAssembly() {
+    if (!this.autoAssemblyActive) return;
+    const targetId = String(this.state?.metadata?.render_target_shot_id || this.autoAssemblyShotId || "").trim();
+    const runId = String(this.state?.metadata?.render_run_id || "").trim();
+    if (!targetId || !runId) {
+      this.autoAssemblyStage = "checking";
+      this.autoAssemblyShotId = "";
+      this.persistAutoAssembly();
+      this.sync();
+      await this.continueAutoAssembly();
+      return;
+    }
+    try {
+      const queueResponse = await api.fetchApi("/queue", { cache: "no-store" });
+      const queue = queueResponse.ok ? await queueResponse.json() : null;
+      if (queue?.queue_running?.length || queue?.queue_pending?.length) {
+        this.transientMessage = `${targetId} 仍在生成；完成后将继续自动串联`;
+        this.render();
+        return;
+      }
+      const historyResponse = await api.fetchApi("/history?max_items=100", { cache: "no-store" });
+      const history = historyResponse.ok ? await historyResponse.json() : {};
+      for (const [promptId, entry] of Object.entries(history || {})) {
+        const context = renderContextFromHistoryEntry(entry);
+        if (context?.targetId !== targetId || context?.runId !== runId) continue;
+        let saved = null;
+        let manifest = context.manifest;
+        for (const output of Object.values(entry?.outputs || {})) {
+          saved ||= savedVideoFromOutput(output);
+          manifest ||= segmentManifestFromOutput(output);
+        }
+        if (saved) {
+          this.registerSegmentVideo(saved, promptId, context, manifest);
+          return;
+        }
+      }
+      this.stopAutoAssembly(`自动补全已停止：${targetId} 的任务记录中没有可恢复的视频结果`);
+    } catch (error) {
+      this.stopAutoAssembly(`自动补全已停止：恢复 ${targetId} 失败（${error?.message || error}）`);
+    }
   }
 
   handleAutoAssemblyFailure(reason) {
@@ -940,7 +1009,7 @@ class CineTimelineWidget {
     }
   }
 
-  sync(render = true) {
+  sync(render = true, markChanged = true) {
     this.normalizeShotSchedule(false);
     this.sourceWidget.value = JSON.stringify(this.state, null, 2);
     this.node.properties ??= {};
@@ -953,6 +1022,7 @@ class CineTimelineWidget {
     if (render) this.render();
     this.node.setDirtyCanvas?.(true, true);
     app.graph?.setDirtyCanvas(true, true);
+    if (markChanged) app.graph?.change?.();
   }
 
   referenceScope(item) {
@@ -1154,7 +1224,7 @@ class CineTimelineWidget {
       end_frame: secondsToFrames(DEFAULT_SEGMENT_SECONDS),
       local_prompt: "",
       camera: "",
-      transition: "cut",
+      transition: this.state.shots.length ? "motion_context" : "cut",
       metadata: {
         duration_seconds: DEFAULT_SEGMENT_SECONDS,
         postprocess_mode: "rtx_vsr",
@@ -1911,6 +1981,13 @@ class CineTimelineWidget {
     return null;
   }
 
+  findUniqueGraphOutputNode(className) {
+    const matches = (app.graph?._nodes || []).filter((node) =>
+      (node.comfyClass || node.type) === className && node.mode !== 4
+    );
+    return matches.length === 1 ? matches[0] : null;
+  }
+
   findDownstreamVideoBranch() {
     const queue = [this.node];
     const visited = new Set();
@@ -2000,6 +2077,7 @@ class CineTimelineWidget {
     this.autoAssemblyActive = true;
     this.autoAssemblyStage = "checking";
     this.autoAssemblyShotId = "";
+    this.persistAutoAssembly();
     this.transientMessage = readiness.ready === readiness.total
       ? "所有片段已存在，准备串联完整影片…"
       : `正在按顺序检查片段，已有 ${readiness.ready}/${readiness.total}…`;
@@ -2019,6 +2097,7 @@ class CineTimelineWidget {
       }
       this.autoAssemblyStage = "segment";
       this.autoAssemblyShotId = missing.shot_id;
+      this.persistAutoAssembly();
       this.transientMessage = `已有 ${readiness.ready}/${readiness.total}，正在补全 ${missing.shot_id}…`;
       this.render();
       await this.queueSingleShot(missing, { fromAutoAssembly: true });
@@ -2027,6 +2106,7 @@ class CineTimelineWidget {
 
     this.autoAssemblyStage = "assembling";
     this.autoAssemblyShotId = "";
+    this.persistAutoAssembly();
     this.state.metadata ??= {};
     delete this.state.metadata.render_target_shot_id;
     delete this.state.metadata.render_run_id;
@@ -2102,7 +2182,13 @@ class CineTimelineWidget {
       const saveNode = this.findOutputNode("CineSaveNormalizedVideo")
         || this.findOutputNode("CineSaveSegmentVideo")
         || this.findOutputNode("SaveVideo")
-        || this.findDownstreamVideoBranch();
+        || this.findDownstreamVideoBranch()
+        // Set/Get routing intentionally has no physical edge between the
+        // timeline and the generation branch. In that layout, accept only a
+        // single unambiguous top-level save target.
+        || this.findUniqueGraphOutputNode("CineSaveNormalizedVideo")
+        || this.findUniqueGraphOutputNode("CineSaveSegmentVideo")
+        || this.findUniqueGraphOutputNode("SaveVideo");
       if (!saveNode) throw new Error("工作流缺少 SaveVideo 节点");
       const validator = this.findOutputNode("CineH3DialogueValidator");
       const targets = [saveNode, validator].filter(Boolean);
