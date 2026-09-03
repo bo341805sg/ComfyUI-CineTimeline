@@ -154,32 +154,63 @@ class CineTimelinePlan:
             "shot_id": str(selected.get("shot_id", "")),
             "render_run_id": run_id,
         }
+        active_refs = active_references(
+            normalized, int(selected["start_frame"]), int(selected["end_frame"])
+        )
         selected_refs = [
-            ref for ref in active_references(
-                normalized, int(selected["start_frame"]), int(selected["end_frame"])
-            )
-            if ref.get("media_type") == "image" and ref.get("image_index") is not None
+            ref for ref in active_refs
+            if str(ref.get("asset_id", "") or "").strip()
         ]
-        # Preserve the editor's priority order, de-duplicate physical inputs,
-        # and remap the chosen images to consecutive H3 Picture ordinals.
-        image_slots = []
+        # The plan is the single source of truth for both selection and actual media
+        # loading. Preserve priority order, scope it to the current shot, and remap
+        # each media family's user-facing ordinals to consecutive H3 tags.
+        media_entries = []
+        ordinal_maps = {"image": {}, "video": {}, "audio": {}}
+        seen_assets = set()
         for ref in selected_refs:
-            slot = int(ref["image_index"]) + 1
-            if slot not in image_slots:
-                image_slots.append(slot)
-        if not image_slots:
-            mentioned = [int(value) for value in re.findall(r"<Picture\s+(\d+)>", segment_prompt)]
-            image_slots = sorted(set(mentioned))
-        ordinal_map = {source: target for target, source in enumerate(image_slots, 1)}
-        for source in sorted(ordinal_map, reverse=True):
-            segment_prompt = re.sub(
-                rf"<Picture\s+{source}>", f"<Picture {ordinal_map[source]}>", segment_prompt
-            )
+            media_type = str(ref.get("media_type", "image"))
+            asset_id = str(ref.get("asset_id", "") or "").strip()
+            dedupe_key = (media_type, asset_id, str(ref.get("type", "")))
+            if dedupe_key in seen_assets:
+                continue
+            seen_assets.add(dedupe_key)
+            source_ordinal = ref.get("media_order")
+            if source_ordinal is None and media_type == "image" and ref.get("image_index") is not None:
+                source_ordinal = int(ref["image_index"]) + 1
+            source_ordinal = int(source_ordinal or len(ordinal_maps[media_type]) + 1)
+            target_ordinal = len([x for x in media_entries if x["media_type"] == media_type]) + 1
+            ordinal_maps[media_type][source_ordinal] = target_ordinal
+            media_entries.append({
+                "reference_id": str(ref.get("reference_id", "")),
+                "media_type": media_type,
+                "reference_type": str(ref.get("type", "")),
+                "asset_id": asset_id,
+                "source_ordinal": source_ordinal,
+                "ordinal": target_ordinal,
+                "strength": float(ref.get("strength", 1.0)),
+            })
+        tag_names = {"image": "Picture", "video": "Video", "audio": "Audio"}
+        for media_type, mapping in ordinal_maps.items():
+            tag = tag_names[media_type]
+            for source in sorted(mapping, reverse=True):
+                segment_prompt = re.sub(
+                    rf"<{tag}\s+{source}>", f"<{tag} {mapping[source]}>", segment_prompt
+                )
+        # Legacy direct-input workflows remain readable, but newly authored timeline
+        # references are carried as asset-backed media entries below.
+        image_slots = [
+            int(ref["image_index"]) + 1 for ref in active_refs
+            if ref.get("media_type") == "image" and ref.get("image_index") is not None
+            and not str(ref.get("asset_id", "") or "").strip()
+        ]
+        ordinal_map = ordinal_maps["image"]
         reference_plan = {
             "schema": "cine_reference_plan",
             "shot_id": str(selected.get("shot_id", "")),
             "image_slots": image_slots,
             "ordinal_map": ordinal_map,
+            "ordinal_maps": ordinal_maps,
+            "media": media_entries,
         }
         return (
             model, segment_prompt, frame_count, hq_refinement,

@@ -4,7 +4,7 @@ import { languageSelect, localizeDom, onLocaleChange, tr } from "./cine_i18n_099
 
 console.info("[CineTimeline] v0.11.0 dialogue validation routing loaded");
 
-const TIMELINE_LAYOUT_VERSION = 65;
+const TIMELINE_LAYOUT_VERSION = 70;
 const TIMELINE_SIZE_LAYOUT_VERSION = 7;
 const TIMELINE_DEFAULT_HEIGHT = 920;
 const TIMELINE_MIN_NODE_HEIGHT = 720;
@@ -142,7 +142,7 @@ function findUpstreamTimelineNode(startNode) {
     if (!current || visited.has(current.id)) continue;
     visited.add(current.id);
     const className = current.comfyClass || current.type;
-    if (current !== startNode && ["CineTimelinePlan", "CineTimelineStudio", "CineTimelineEditor"].includes(className)) {
+    if (current !== startNode && ["CineTimelinePlan", "CineTimelineKeyframePlan", "CineTimelineStudio", "CineTimelineEditor"].includes(className)) {
       return current;
     }
     for (const input of current.inputs || []) {
@@ -182,7 +182,7 @@ function renderContextFromHistoryEntry(entry) {
     manifest ||= segmentManifestFromOutput(output);
   }
   for (const node of Object.values(graph)) {
-    if (node?.class_type !== "CineTimelinePlan") continue;
+    if (!["CineTimelinePlan", "CineTimelineKeyframePlan"].includes(node?.class_type)) continue;
     const directTargetId = String(node?.inputs?.render_target_shot_id || "").trim();
     const directRunId = String(node?.inputs?.render_run_id || "").trim();
     if (directTargetId) return { targetId: directTargetId, runId: directRunId, manifest };
@@ -380,6 +380,7 @@ class CineTimelineWidget {
     this.sourceWidget = sourceWidget;
     this.targetWidget = targetWidget;
     this.runWidget = runWidget;
+    this.isKeyframeMode = (node.comfyClass || node.type) === "CineTimelineKeyframePlan";
     this.state = null;
     this.selected = null;
     this.activeShotId = String(node.properties?.cineTimelineActiveShotId || "");
@@ -424,7 +425,7 @@ class CineTimelineWidget {
       ".cine-note{grid-column:1/-1;padding:8px 10px;border:1px solid #394759;border-radius:5px;background:#222b38;color:#b9c7d9;line-height:1.45}.cine-note.pending{border-color:#735b2f;background:#30291d;color:#f1d49a}.cine-actions{grid-column:1/-1;display:flex;justify-content:flex-end;gap:7px}" +
       ".cine-section-title{grid-column:1/-1;margin-top:4px;padding-top:9px;border-top:1px solid #334052;color:#d7e2f0;font-weight:700}" +
       ".cine-reference-editor{grid-column:1/-1;border:1px solid #36445a;border-radius:7px;background:#141a22;overflow:hidden}.cine-reference-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:7px 8px;background:#202938;color:#e6edf7;font-weight:700}.cine-reference-count{color:#8fa0b6;font-weight:500}.cine-reference-spacer{flex:1}.cine-ref-add-wrap{display:inline-flex}.cine-ref-add-input{display:none}.cine-ref-usage{display:flex;gap:4px;flex-wrap:wrap;font-weight:500}.cine-usage-pill{padding:2px 6px;border:1px solid #3d4858;border-radius:10px;background:#171d26;color:#aeb9c8;font-size:10px}.cine-usage-pill.invalid{border-color:#a84b55;background:#3a2026;color:#ffadb4}" +
-      ".cine-ref-body{padding:8px}.cine-ref-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:7px}.cine-ref-card{--media:#3ba6ff;position:relative;display:grid;grid-template-columns:44px minmax(0,1fr);gap:7px;min-height:84px;padding:7px;border:1px solid color-mix(in srgb,var(--media) 55%,#303947);border-left:4px solid var(--media);border-radius:7px;background:color-mix(in srgb,var(--media) 9%,#1a2029);overflow:hidden}.cine-ref-card.video{--media:#a875ff}.cine-ref-card.audio{--media:#f0aa3c}.cine-ref-card.invalid{box-shadow:inset 0 0 0 2px #c24c59}.cine-ref-thumb{display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:5px;background:#0e131a;color:var(--media);font-size:21px;font-weight:800;overflow:hidden}.cine-ref-thumb img{width:100%;height:100%;object-fit:cover}.cine-ref-info{min-width:0}.cine-ref-top{display:grid;grid-template-columns:48px minmax(0,1fr);gap:5px;padding-right:21px}.cine-ref-order{padding:3px 4px!important;border-color:var(--media)!important;color:var(--media)!important;font-weight:800}.cine-ref-name{padding:3px 4px!important}.cine-ref-type{margin-top:5px;padding:3px 4px!important}.cine-ref-delete{position:absolute;right:5px;top:5px;width:22px!important;height:22px;padding:0!important;border:1px solid #623d45!important;border-radius:50%!important;background:#2c2025!important;color:#ff9ca8!important;cursor:pointer}.cine-ref-delete:hover{background:#65313c!important;color:#fff!important}" +
+      ".cine-ref-body{padding:8px}.cine-ref-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:7px}.cine-ref-card{--media:#3ba6ff;position:relative;display:grid;grid-template-columns:44px minmax(0,1fr);gap:7px;min-height:84px;padding:7px;border:1px solid color-mix(in srgb,var(--media) 55%,#303947);border-left:4px solid var(--media);border-radius:7px;background:color-mix(in srgb,var(--media) 9%,#1a2029);overflow:hidden}.cine-ref-card.video{--media:#a875ff}.cine-ref-card.audio{--media:#f0aa3c}.cine-ref-card.invalid{box-shadow:inset 0 0 0 2px #c24c59}.cine-ref-thumb{display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:5px;background:#0e131a;color:var(--media);font-size:21px;font-weight:800;overflow:hidden}.cine-ref-thumb img{width:100%;height:100%;object-fit:cover}.cine-ref-info{min-width:0}.cine-ref-top{display:grid;grid-template-columns:48px minmax(0,1fr);gap:5px;padding-right:21px}.cine-ref-order{padding:3px 4px!important;border-color:var(--media)!important;color:var(--media)!important;font-weight:800}.cine-ref-name{padding:3px 4px!important}.cine-ref-type{margin-top:5px;padding:3px 4px!important}.cine-ref-delete{position:absolute;right:5px;top:5px;width:22px!important;height:22px;padding:0!important;border:1px solid #623d45!important;border-radius:50%!important;background:#2c2025!important;color:#ff9ca8!important;cursor:pointer}.cine-ref-delete:hover{background:#65313c!important;color:#fff!important}.cine-ref-keyframe-row{display:grid;grid-template-columns:minmax(0,1fr) 64px;gap:5px;margin-top:5px}.cine-ref-keyframe-row .cine-ref-type{margin-top:0}" +
       ".cine-ref-empty{padding:8px;color:#738096}.cine-ref-drop{display:flex;align-items:center;justify-content:center;min-height:44px;margin-top:7px;border:1px dashed #4a5a70;border-radius:7px;color:#8290a5;cursor:pointer;text-align:center}.cine-ref-drop.dragover{border-color:#77b5ff;background:#1c2c40;color:#d7eaff}.cine-ref-drop input{display:none}" +
       ".cine-ref-preview{position:fixed;z-index:1000000;width:min(340px,calc(100vw - 24px));padding:8px;border:1px solid #52617a;border-radius:8px;background:#111720;color:#eef4fd;box-shadow:0 14px 36px #000c;pointer-events:auto}.cine-ref-preview-title{display:flex;gap:8px;align-items:center;margin:0 2px 7px;color:#cbd6e5;font-size:11px}.cine-ref-preview img,.cine-ref-preview video{display:block;width:100%;max-height:260px;object-fit:contain;border-radius:5px;background:#090d12}.cine-ref-preview audio{display:block;width:100%;height:38px}" +
       ".cine-empty{padding:12px;color:#687487}.cine-status{flex:0 0 18px;padding:5px 2px 0;color:#8491a3}.cine-status.invalid{color:#ff9da7}" +
@@ -439,23 +440,15 @@ class CineTimelineWidget {
     this.root.append(this.toolbar, this.main, this.inspector, this.status);
 
     const timelineReady = this.reloadState();
-    const persistedAssembly = this.state?.metadata?.auto_assembly;
-    if (persistedAssembly?.active) {
-      this.autoAssemblyActive = true;
-      this.autoAssemblyStage = String(persistedAssembly.stage || "checking");
-      this.autoAssemblyShotId = String(persistedAssembly.shot_id || "");
-    } else if (this.state?.metadata) {
-      // A standalone render cannot be resumed safely after a reload. Automatic
-      // assembly carries an explicit marker and is recovered below.
+    // Queue scope is runtime-only. A browser/server restart cannot resume the
+    // old callback, so persisted values would permanently block new renders.
+    if (this.state?.metadata) {
       delete this.state.metadata.render_target_shot_id;
       delete this.state.metadata.render_run_id;
-      if (this.targetWidget) this.targetWidget.value = "";
-      if (this.runWidget) this.runWidget.value = "";
     }
-    if (timelineReady) {
-      this.sync(true, false);
-      if (this.autoAssemblyActive) setTimeout(() => this.recoverAutoAssembly(), 0);
-    }
+    if (this.targetWidget) this.targetWidget.value = "";
+    if (this.runWidget) this.runWidget.value = "";
+    if (timelineReady) this.sync();
   }
 
   reloadState() {
@@ -524,12 +517,10 @@ class CineTimelineWidget {
       this.state.metadata = this.state.metadata && typeof this.state.metadata === "object"
         ? this.state.metadata
         : {};
-      if (!this.state.metadata.auto_assembly?.active) {
-        delete this.state.metadata.render_target_shot_id;
-        delete this.state.metadata.render_run_id;
-        if (this.targetWidget) this.targetWidget.value = "";
-        if (this.runWidget) this.runWidget.value = "";
-      }
+      delete this.state.metadata.render_target_shot_id;
+      delete this.state.metadata.render_run_id;
+      if (this.targetWidget) this.targetWidget.value = "";
+      if (this.runWidget) this.runWidget.value = "";
       this.state.fps = FIXED_FPS;
       for (const key of ["shots", "references", "audio", "subtitles"]) {
         this.state[key] = Array.isArray(this.state[key]) ? this.state[key] : [];
@@ -740,7 +731,6 @@ class CineTimelineWidget {
     if (continueAssembly) {
       this.autoAssemblyStage = "checking";
       this.autoAssemblyShotId = "";
-      this.persistAutoAssembly();
       this.transientMessage = `${targetShot.shot_id} 已补全，正在检查下一片段…`;
     } else {
       this.transientMessage = `已把 ${targetShot.shot_id} 的新结果登记到视频轨；完整影片需要重新串联`;
@@ -783,7 +773,6 @@ class CineTimelineWidget {
     this.autoAssemblyActive = false;
     this.autoAssemblyStage = "idle";
     this.autoAssemblyShotId = "";
-    delete this.state.metadata.auto_assembly;
     this.transientMessage = `已串联并保存 ${this.state.shots.length} 个片段的完整影片`;
     this.sync();
   }
@@ -799,65 +788,8 @@ class CineTimelineWidget {
     delete this.state?.metadata?.render_run_id;
     if (this.targetWidget) this.targetWidget.value = "";
     if (this.runWidget) this.runWidget.value = "";
-    if (this.state?.metadata) delete this.state.metadata.auto_assembly;
     this.transientMessage = message;
     this.sync();
-  }
-
-  persistAutoAssembly() {
-    this.state.metadata ??= {};
-    if (!this.autoAssemblyActive) {
-      delete this.state.metadata.auto_assembly;
-      return;
-    }
-    this.state.metadata.auto_assembly = {
-      active: true,
-      stage: this.autoAssemblyStage,
-      shot_id: this.autoAssemblyShotId,
-      updated_at: new Date().toISOString(),
-    };
-  }
-
-  async recoverAutoAssembly() {
-    if (!this.autoAssemblyActive) return;
-    const targetId = String(this.state?.metadata?.render_target_shot_id || this.autoAssemblyShotId || "").trim();
-    const runId = String(this.state?.metadata?.render_run_id || "").trim();
-    if (!targetId || !runId) {
-      this.autoAssemblyStage = "checking";
-      this.autoAssemblyShotId = "";
-      this.persistAutoAssembly();
-      this.sync();
-      await this.continueAutoAssembly();
-      return;
-    }
-    try {
-      const queueResponse = await api.fetchApi("/queue", { cache: "no-store" });
-      const queue = queueResponse.ok ? await queueResponse.json() : null;
-      if (queue?.queue_running?.length || queue?.queue_pending?.length) {
-        this.transientMessage = `${targetId} 仍在生成；完成后将继续自动串联`;
-        this.render();
-        return;
-      }
-      const historyResponse = await api.fetchApi("/history?max_items=100", { cache: "no-store" });
-      const history = historyResponse.ok ? await historyResponse.json() : {};
-      for (const [promptId, entry] of Object.entries(history || {})) {
-        const context = renderContextFromHistoryEntry(entry);
-        if (context?.targetId !== targetId || context?.runId !== runId) continue;
-        let saved = null;
-        let manifest = context.manifest;
-        for (const output of Object.values(entry?.outputs || {})) {
-          saved ||= savedVideoFromOutput(output);
-          manifest ||= segmentManifestFromOutput(output);
-        }
-        if (saved) {
-          this.registerSegmentVideo(saved, promptId, context, manifest);
-          return;
-        }
-      }
-      this.stopAutoAssembly(`自动补全已停止：${targetId} 的任务记录中没有可恢复的视频结果`);
-    } catch (error) {
-      this.stopAutoAssembly(`自动补全已停止：恢复 ${targetId} 失败（${error?.message || error}）`);
-    }
   }
 
   handleAutoAssemblyFailure(reason) {
@@ -910,6 +842,13 @@ class CineTimelineWidget {
       nextByType[ref.media_type] = Math.max(nextByType[ref.media_type], ref.media_order + 1);
       ref.priority = 1000 - ref.media_order;
       ref.metadata = ref.metadata && typeof ref.metadata === "object" ? ref.metadata : {};
+      if (this.isKeyframeMode && ref.media_type === "image" && ref.scope === "shot") {
+        const shot = this.state.shots.find((item) => item.shot_id === ref.shot_id);
+        const minimum = num(shot?.start_frame, 0);
+        const maximum = Math.max(minimum, num(shot?.end_frame, minimum + 1) - 1);
+        ref.keyframe_frame = clamp(Math.round(num(ref.keyframe_frame, minimum)), minimum, maximum);
+        ref.keyframe_role = ref.keyframe_frame === minimum ? "first" : ref.keyframe_frame === maximum ? "last" : "guide";
+      }
     }
 
     for (const shot of this.state.shots) {
@@ -1009,7 +948,7 @@ class CineTimelineWidget {
     }
   }
 
-  sync(render = true, markChanged = true) {
+  sync(render = true) {
     this.normalizeShotSchedule(false);
     this.sourceWidget.value = JSON.stringify(this.state, null, 2);
     this.node.properties ??= {};
@@ -1022,7 +961,33 @@ class CineTimelineWidget {
     if (render) this.render();
     this.node.setDirtyCanvas?.(true, true);
     app.graph?.setDirtyCanvas(true, true);
-    if (markChanged) app.graph?.change?.();
+  }
+
+  persistStateOnly() {
+    // Execution preparation must not normalize, call widget callbacks, or
+    // rebuild the editor. It only serializes the exact authoring state that
+    // is currently visible so graphToPrompt can capture it unchanged.
+    this.sourceWidget.value = JSON.stringify(this.state, null, 2);
+    this.node.properties ??= {};
+    this.node.properties.cineTimelineStateBackup = JSON.stringify(this.state);
+    this.node.setDirtyCanvas?.(true, true);
+    app.graph?.setDirtyCanvas(true, true);
+  }
+
+  commitPendingPromptEditors() {
+    // Do not rely on blur/change ordering.  In particular, an active IME
+    // composition can leave the visible textarea newer than timeline_state
+    // when the render button is clicked.
+    for (const input of this.root.querySelectorAll("textarea[data-cine-shot-id][data-cine-shot-key]")) {
+      const shotId = String(input.dataset.cineShotId || "");
+      const key = String(input.dataset.cineShotKey || "");
+      const shot = this.state?.shots?.find((item) => String(item.shot_id || "") === shotId);
+      if (!shot || !key) continue;
+      shot[key] = input.value;
+      shot.metadata ??= {};
+      if (key === "local_prompt") shot.metadata.prompt_source = "manual_override";
+    }
+    this.persistStateOnly();
   }
 
   referenceScope(item) {
@@ -1039,6 +1004,9 @@ class CineTimelineWidget {
   }
 
   globalReferences() {
+    // Keyframe mode is segment-scoped by design.  Keep legacy global entries
+    // serialized for recoverability, but never expose or inject them.
+    if (this.isKeyframeMode) return [];
     return this.state.references.filter((ref) => this.referenceScope(ref) === "global");
   }
 
@@ -1119,6 +1087,15 @@ class CineTimelineWidget {
     const errors = [];
     const isFL2VA = upstreamModelProfile(this.node) === "MiniMax H3 FL2VA";
     const continuity = this.automaticContinuity(shot);
+
+    if (this.isKeyframeMode) {
+      const keyframes = this.shotReferences(shot).filter((ref) => ref.media_type === "image" && String(ref.asset_id || "").trim());
+      const frames = keyframes.map((ref) => Math.round(num(ref.keyframe_frame, -1)));
+      if (frames.length !== new Set(frames).size) errors.push("关键帧位置不能重复");
+      if (keyframes.length >= 1 && !frames.includes(shot.start_frame)) errors.push("已有参考图时缺少片段首帧图片");
+      if (keyframes.length >= 2 && !frames.includes(shot.end_frame - 1)) errors.push("两张或以上图片时缺少片段尾帧图片");
+      if (frames.some((frame) => frame < shot.start_frame || frame >= shot.end_frame)) errors.push("关键帧超出当前片段");
+    }
 
     if (isFL2VA) {
       const unsupported = refs.filter(
@@ -1282,6 +1259,11 @@ class CineTimelineWidget {
       priority: 1000 - order,
       metadata: {},
     };
+    if (this.isKeyframeMode && scope === "shot" && mediaType === "image") {
+      const existing = this.shotReferences(shot).filter((item) => item.media_type === "image");
+      ref.keyframe_frame = existing.length === 0 ? shot.start_frame : existing.length === 1 ? shot.end_frame - 1 : Math.round((shot.start_frame + shot.end_frame - 1) / 2);
+      ref.keyframe_role = existing.length === 0 ? "first" : existing.length === 1 ? "last" : "guide";
+    }
     this.state.references.push(ref);
     if (render) this.sync();
     return ref;
@@ -1408,7 +1390,7 @@ class CineTimelineWidget {
 
   renderToolbar() {
     this.toolbar.replaceChildren();
-    this.toolbar.append(el("div", "cine-title", "CineTimeline 电影时间轴"));
+    this.toolbar.append(el("div", "cine-title", this.isKeyframeMode ? "CineTimeline 关键帧时间轴" : "CineTimeline 电影时间轴"));
     this.toolbar.append(languageSelect(() => this.render()));
     const total = this.state.shots.length ? framesToSeconds(this.state.total_frames).toFixed(1) : "0.0";
     this.toolbar.append(el("span", "cine-total", "总时长 " + total + " 秒"));
@@ -1923,14 +1905,16 @@ class CineTimelineWidget {
       if (event.key === "Enter" || event.key === " ") rememberSize();
     }, true);
     const globalRefs = this.globalReferences();
-    const badges = globalRefs.length + " 参考 · " + this.state.background_music.length + " BGM";
+    const badges = this.isKeyframeMode
+      ? this.state.background_music.length + " BGM"
+      : globalRefs.length + " 参考 · " + this.state.background_music.length + " BGM";
     summary.append(el("strong", "", "全局设置"), el("span", "cine-settings-badge", badges));
     panel.append(summary);
 
     const fields = el("div", "cine-fields");
     this.timelineTextarea(fields, "全局提示词", "global_prompt");
     this.timelineTextarea(fields, "全局负面提示词", "negative_prompt");
-    fields.append(this.renderReferenceEditor("global", null));
+    if (!this.isKeyframeMode) fields.append(this.renderReferenceEditor("global", null));
     panel.append(fields);
     return panel;
   }
@@ -2077,7 +2061,6 @@ class CineTimelineWidget {
     this.autoAssemblyActive = true;
     this.autoAssemblyStage = "checking";
     this.autoAssemblyShotId = "";
-    this.persistAutoAssembly();
     this.transientMessage = readiness.ready === readiness.total
       ? "所有片段已存在，准备串联完整影片…"
       : `正在按顺序检查片段，已有 ${readiness.ready}/${readiness.total}…`;
@@ -2097,7 +2080,6 @@ class CineTimelineWidget {
       }
       this.autoAssemblyStage = "segment";
       this.autoAssemblyShotId = missing.shot_id;
-      this.persistAutoAssembly();
       this.transientMessage = `已有 ${readiness.ready}/${readiness.total}，正在补全 ${missing.shot_id}…`;
       this.render();
       await this.queueSingleShot(missing, { fromAutoAssembly: true });
@@ -2106,7 +2088,6 @@ class CineTimelineWidget {
 
     this.autoAssemblyStage = "assembling";
     this.autoAssemblyShotId = "";
-    this.persistAutoAssembly();
     this.state.metadata ??= {};
     delete this.state.metadata.render_target_shot_id;
     delete this.state.metadata.render_run_id;
@@ -2121,7 +2102,25 @@ class CineTimelineWidget {
     }
   }
 
-  async queueSingleShot(shot, { fromAutoAssembly = false } = {}) {
+  async queueSingleShot(shot, { fromAutoAssembly = false, promptSnapshot = null } = {}) {
+    const requestedShotId = String(shot?.shot_id || "");
+    const visibleEditor = [...this.root.querySelectorAll("textarea[data-cine-shot-id][data-cine-shot-key='local_prompt']")]
+      .find((input) => String(input.dataset.cineShotId || "") === requestedShotId);
+    const currentPrompt = promptSnapshot != null ? String(promptSnapshot) : visibleEditor?.value;
+    this.commitPendingPromptEditors();
+    const currentShot = this.state?.shots?.find((item) => String(item.shot_id || "") === requestedShotId);
+    if (!currentShot) {
+      this.transientMessage = `找不到当前片段 ${requestedShotId || "（未知）"}，请重新选择片段`;
+      this.render();
+      return false;
+    }
+    shot = currentShot;
+    if (currentPrompt != null) {
+      shot.local_prompt = currentPrompt;
+      shot.metadata ??= {};
+      shot.metadata.prompt_source = "manual_override";
+      this.persistStateOnly();
+    }
     const activeTargetId = String(this.state?.metadata?.render_target_shot_id || "").trim();
     const activeRunId = String(this.state?.metadata?.render_run_id || "").trim();
     if (activeTargetId && activeRunId) {
@@ -2177,7 +2176,7 @@ class CineTimelineWidget {
     const previousStatus = render.status;
     render.status = "redo";
     this.transientMessage = `正在把 ${shot.shot_id} 加入单片段生成队列…`;
-    this.sync();
+    this.persistStateOnly();
     try {
       const saveNode = this.findOutputNode("CineSaveNormalizedVideo")
         || this.findOutputNode("CineSaveSegmentVideo")
@@ -2192,14 +2191,31 @@ class CineTimelineWidget {
       if (!saveNode) throw new Error("工作流缺少 SaveVideo 节点");
       const validator = this.findOutputNode("CineH3DialogueValidator");
       const targets = [saveNode, validator].filter(Boolean);
-      const previousModes = targets.map((node) => node.mode);
+      // `timeline_json` may remain connected to AIPM for authoring.  A local
+      // segment render must not execute that authoring node again: its cached
+      // completion handler writes the original AIPM package back into the
+      // timeline and would replace a user's manual prompt edit.  Temporarily
+      // mute only the directly connected AIPM source while graphToPrompt
+      // captures this render; the planner deliberately reads timeline_state
+      // for a local target/run.
+      const timelineInput = this.node.inputs?.find((input) => input?.name === "timeline_json");
+      const timelineLink = timelineInput?.link != null
+        ? (app.graph?.links?.[timelineInput.link] || app.graph?.links?.get?.(timelineInput.link))
+        : null;
+      const timelineSource = timelineLink ? app.graph?.getNodeById?.(timelineLink.origin_id) : null;
+      const authoringSources = String(timelineSource?.comfyClass || timelineSource?.type || "") === "AIPMVideoPrompt"
+        ? [timelineSource]
+        : [];
+      const modeNodes = [...targets, ...authoringSources];
+      const previousModes = modeNodes.map((node) => node.mode);
       targets.forEach((node) => { node.mode = 0; });
+      authoringSources.forEach((node) => { node.mode = 2; });
       let queued;
       try {
         await this.ensureDynamicLatentPreview();
         queued = await app.queuePrompt(0, 1, targets.map((node) => String(node.id)));
       } finally {
-        targets.forEach((node, index) => { node.mode = previousModes[index]; });
+        modeNodes.forEach((node, index) => { node.mode = previousModes[index]; });
       }
       if (queued === false) throw new Error("ComfyUI 未接受生成任务");
       this.transientMessage = fromAutoAssembly
@@ -2216,7 +2232,8 @@ class CineTimelineWidget {
       if (fromAutoAssembly) this.stopAutoAssembly(`自动补全已停止：${shot.shot_id} 未排队（${error?.message || error}）`);
       else {
         this.transientMessage = `片段生成未排队：${error?.message || error}`;
-        this.sync();
+        this.persistStateOnly();
+        this.render();
       }
       return false;
     }
@@ -2238,7 +2255,7 @@ class CineTimelineWidget {
     panel.append(summary);
 
     const fields = el("div", "cine-fields");
-    this.shotTextarea(fields, "片段提示词（可包含多个镜头）", shot, "local_prompt");
+    const promptEditor = this.shotTextarea(fields, "片段提示词（可包含多个镜头）", shot, "local_prompt");
     const primary = el("div", "cine-primary-row");
     this.shotDurationField(primary, shot);
     const isFirst = this.state.shots[0] === shot;
@@ -2268,7 +2285,9 @@ class CineTimelineWidget {
       ));
     }
     const actions = el("div", "cine-actions");
-    const rerender = this.button("生成当前片段", () => this.queueSingleShot(shot));
+    const rerender = this.button("生成当前片段", () => this.queueSingleShot(shot, {
+      promptSnapshot: promptEditor.value,
+    }));
     const usage = this.referenceUsage(shot);
     rerender.disabled = this.autoAssemblyActive || !usage.valid || (usage.autoContinuity && !usage.previousReady);
     rerender.title = usage.autoContinuity && !usage.previousReady
@@ -2302,15 +2321,26 @@ class CineTimelineWidget {
     const wrap = el("label", "cine-field full prompt", label);
     const input = document.createElement("textarea");
     input.value = shot[key] || "";
+    input.dataset.cineShotId = String(shot.shot_id || "");
+    input.dataset.cineShotKey = key;
     input.addEventListener("input", () => {
       shot[key] = input.value;
+      shot.metadata ??= {};
+      if (key === "local_prompt") shot.metadata.prompt_source = "manual_override";
     });
     input.addEventListener("change", () => {
       shot[key] = input.value;
-      this.sync();
+      shot.metadata ??= {};
+      if (key === "local_prompt") shot.metadata.prompt_source = "manual_override";
+      // A button click blurs the textarea before its click event. Rendering
+      // here would remove both elements and leave the global button proxy to
+      // invoke a stale closure. Persist the draft without replacing the DOM;
+      // the button action performs the intentional render after queue setup.
+      this.persistStateOnly();
     });
     wrap.append(input);
     grid.append(wrap);
+    return input;
   }
 
   shotDurationField(grid, shot) {
@@ -2395,11 +2425,13 @@ class CineTimelineWidget {
     const refs = scope === "global" ? this.globalReferences() : this.shotReferences(shot);
     const section = el("section", "cine-reference-editor");
     const head = el("div", "cine-reference-head");
-    head.append(el("span", "", scope === "global" ? "通用参考" : "片段参考"));
+    head.append(el("span", "", scope === "global" ? "通用参考" : this.isKeyframeMode ? "分段关键帧" : "片段参考"));
     head.append(el("span", "cine-reference-count", String(refs.length)));
+    if (this.isKeyframeMode && scope === "shot") head.append(el("span", "cine-reference-count", "图片需指定所在帧"));
     if (scope === "shot") head.append(this.usagePills(this.referenceUsage(shot)));
     head.append(el("span", "cine-reference-spacer"));
-    for (const mediaType of MEDIA_TYPES) head.append(this.renderReferenceAdd(scope, mediaType));
+    const allowedMedia = this.isKeyframeMode ? ["image"] : MEDIA_TYPES;
+    for (const mediaType of allowedMedia) head.append(this.renderReferenceAdd(scope, mediaType));
     section.append(head);
 
     const body = el("div", "cine-ref-body");
@@ -2412,7 +2444,7 @@ class CineTimelineWidget {
       for (const ref of sorted) grid.append(this.renderReferenceCard(ref, shot));
       body.append(grid);
     } else {
-      body.append(el("div", "cine-ref-empty", scope === "global" ? "暂无通用参考。" : "当前片段暂无专属参考。"));
+      body.append(el("div", "cine-ref-empty", scope === "global" ? "暂无通用参考。" : this.isKeyframeMode ? "当前片段暂无关键帧图片。" : "当前片段暂无专属参考。"));
     }
     body.append(this.renderReferenceDrop(scope));
     section.append(body);
@@ -2513,7 +2545,28 @@ class CineTimelineWidget {
       ref.type = type.value;
       this.sync();
     });
-    info.append(top, type);
+    info.append(top);
+    if (!(this.isKeyframeMode && shot && media === "image")) info.append(type);
+    if (this.isKeyframeMode && shot && media === "image") {
+      const row = el("div", "cine-ref-keyframe-row");
+      const role = document.createElement("select"); role.className = "cine-ref-type";
+      for (const [value, label] of [["first", "首帧"], ["guide", "中间关键帧"], ["last", "尾帧"]]) {
+        const option = document.createElement("option"); option.value = value; option.textContent = label; role.append(option);
+      }
+      const frame = document.createElement("input"); frame.type = "number"; frame.className = "cine-ref-order";
+      frame.min = String(shot.start_frame); frame.max = String(shot.end_frame - 1);
+      frame.value = String(num(ref.keyframe_frame, shot.start_frame)); frame.title = "全局帧位置";
+      role.value = ref.keyframe_role || (num(frame.value) === shot.start_frame ? "first" : num(frame.value) === shot.end_frame - 1 ? "last" : "guide");
+      const commit = (source) => {
+        let value = clamp(Math.round(num(frame.value, shot.start_frame)), shot.start_frame, shot.end_frame - 1);
+        if (source === "role") value = role.value === "first" ? shot.start_frame : role.value === "last" ? shot.end_frame - 1 : clamp(value, shot.start_frame + 1, shot.end_frame - 2);
+        ref.keyframe_frame = value;
+        ref.keyframe_role = value === shot.start_frame ? "first" : value === shot.end_frame - 1 ? "last" : "guide";
+        this.sync();
+      };
+      role.addEventListener("change", () => commit("role")); frame.addEventListener("change", () => commit("frame"));
+      row.append(role, frame); info.append(row);
+    }
 
     const remove = el("button", "cine-ref-delete", "×");
     remove.type = "button";
@@ -2546,11 +2599,15 @@ class CineTimelineWidget {
   }
 
   renderReferenceDrop(scope) {
-    const drop = el("div", "cine-ref-drop", "拖入图片、视频或音频，或点击选择文件");
+    const drop = el(
+      "div",
+      "cine-ref-drop",
+      this.isKeyframeMode ? "拖入关键帧图片，或点击选择图片" : "拖入图片、视频或音频，或点击选择文件"
+    );
     const input = document.createElement("input");
     input.type = "file";
     input.multiple = true;
-    input.accept = "image/*,video/*,audio/*";
+    input.accept = this.isKeyframeMode ? "image/*" : "image/*,video/*,audio/*";
     drop.append(input);
     drop.addEventListener("click", () => input.click());
     input.addEventListener("change", () => this.uploadReferenceFiles(scope, input.files));
@@ -2812,10 +2869,10 @@ function installH3LatentPreviewListener() {
 // preview events as soon as a queued prompt is accepted.
 installH3LatentPreviewListener();
 
-if (!globalThis.__cineTimelineEditorV93) {
-  globalThis.__cineTimelineEditorV93 = true;
+if (!globalThis.__cineTimelineEditorV97) {
+  globalThis.__cineTimelineEditorV97 = true;
   app.registerExtension({
-    name: "ComfyUI.CineTimeline.Editor.V93",
+    name: "ComfyUI.CineTimeline.Editor.V97",
     setup() {
       // H3 two-pass workflows hold several large frame/latent tensors at once.
       // Keeping VHS intermediates across stages can exhaust host/GPU memory and
@@ -2842,7 +2899,8 @@ if (!globalThis.__cineTimelineEditorV93) {
     },
     async nodeCreated(node) {
       const className = node.comfyClass || node.type;
-      if (!["CineTimelineEditor", "CineTimelineStudio", "CineTimelinePlan"].includes(className)) return;
+      if (!["CineTimelineEditor", "CineTimelineStudio", "CineTimelinePlan", "CineTimelineKeyframePlan"].includes(className)) return;
+      node.title = className === "CineTimelineKeyframePlan" ? "CineTimeline Studio｜关键帧模式" : "CineTimeline Studio｜多模态模式";
       if (node.cineTimelineEditor?.layoutVersion === TIMELINE_LAYOUT_VERSION) return;
       removeTimelineWidgets(node);
       if (node._cineTimelineOriginalResize) node.onResize = node._cineTimelineOriginalResize;
@@ -2969,7 +3027,7 @@ if (!globalThis.__cineTimelineEditorV93) {
       for (const delay of [50, 250, 1000]) setTimeout(restoreDesiredSize, delay);
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
-      if (!["CineTimelineEditor", "CineTimelineStudio", "CineTimelinePlan"].includes(nodeData.name)) return;
+      if (!["CineTimelineEditor", "CineTimelineStudio", "CineTimelinePlan", "CineTimelineKeyframePlan"].includes(nodeData.name)) return;
       const originalConfigure = nodeType.prototype.onConfigure;
       nodeType.prototype.onConfigure = function (info) {
         const saved = Array.isArray(info?.size) ? [...info.size] : [...(this.size || [])];

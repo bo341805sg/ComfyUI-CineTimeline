@@ -102,12 +102,28 @@ class CineSaveNormalizedVideo(io.ComfyNode):
         if not latent_path or not os.path.isfile(latent_path):
             return None
         prompt = cls.hidden.prompt if isinstance(cls.hidden.prompt, dict) else {}
-        plan = next((node for node in prompt.values() if node.get("class_type") == "CineTimelinePlan"), None)
+        plan = next((node for node in prompt.values() if node.get("class_type") in {
+            "CineTimelinePlan", "CineTimelineKeyframePlan"
+        }), None)
         if not plan:
             return None
         inputs = plan.get("inputs") or {}
         shot_id = str(inputs.get("render_target_shot_id") or "").strip()
         run_id = str(inputs.get("render_run_id") or "").strip()
+        if not shot_id or not run_id:
+            for key in ("timeline_state", "timeline_json"):
+                raw = inputs.get(key)
+                if not isinstance(raw, str):
+                    continue
+                try:
+                    timeline = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                metadata = timeline.get("metadata", {}) if isinstance(timeline, dict) else {}
+                shot_id = shot_id or str(metadata.get("render_target_shot_id") or "").strip()
+                run_id = run_id or str(metadata.get("render_run_id") or "").strip()
+                if shot_id and run_id:
+                    break
         transition = "cut"
         source_shot_id = ""
         source_version_id = ""

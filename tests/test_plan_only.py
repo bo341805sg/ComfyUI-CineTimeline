@@ -81,9 +81,40 @@ class PlanOnlyPluginTests(unittest.TestCase):
         result = nodes.CineTimelinePlan().build(
             object(), json.dumps(timeline), json.dumps(timeline), "S2", "run-2"
         )
-        self.assertEqual(json.loads(result[5])["image_slots"], [2])
+        plan = json.loads(result[5])
+        self.assertEqual(plan["image_slots"], [])
+        self.assertEqual(plan["media"][0]["asset_id"], "two.png")
+        self.assertEqual(plan["media"][0]["ordinal"], 1)
         self.assertIn("<Picture 1>", result[1])
         self.assertNotIn("<Picture 2>", result[1])
+
+    def test_plan_carries_scoped_image_video_and_audio_assets(self):
+        timeline = json.loads(nodes.DEFAULT_STUDIO_TIMELINE)
+        timeline["shots"][0]["local_prompt"] = (
+            "use <Picture 3>, <Video 2>, and <Audio 3>"
+        )
+        timeline["references"] = [
+            {"reference_id": "I3", "type": "character", "media_type": "image",
+             "media_order": 3, "start_frame": 0, "end_frame": 120,
+             "strength": 1, "priority": 30, "asset_id": "refs/person.png"},
+            {"reference_id": "V2", "type": "video", "media_type": "video",
+             "media_order": 2, "start_frame": 0, "end_frame": 120,
+             "strength": 1, "priority": 20, "asset_id": "refs/motion.mp4"},
+            {"reference_id": "A3", "type": "audio", "media_type": "audio",
+             "media_order": 3, "start_frame": 0, "end_frame": 120,
+             "strength": 1, "priority": 10, "asset_id": "refs/voice.wav"},
+        ]
+        result = nodes.CineTimelinePlan().build(object(), json.dumps(timeline))
+        plan = json.loads(result[5])
+        self.assertEqual(
+            [(x["media_type"], x["asset_id"], x["ordinal"]) for x in plan["media"]],
+            [("image", "refs/person.png", 1),
+             ("video", "refs/motion.mp4", 1),
+             ("audio", "refs/voice.wav", 1)],
+        )
+        self.assertIn("<Picture 1>", result[1])
+        self.assertIn("<Video 1>", result[1])
+        self.assertIn("<Audio 1>", result[1])
 
 
 if __name__ == "__main__":
