@@ -168,7 +168,7 @@ class CineTimelineKeyframePlan:
                           "source_latent_path": str((previous_version or {}).get("latent_path", "")),
                           "source_latent_sha256": str((previous_version or {}).get("latent_sha256", "")).lower(),
                           "shot_id": plan["segment_id"], "render_run_id": run_id,
-                          "save_prefix": f"ComfyOS/CineTimeline/Latents/{safe_shot}/{safe_run}/continuation"}
+                          "save_prefix": f"CineTimeline/Latents/{safe_shot}/{safe_run}/continuation"}
         return (model, plan["prompt"], generation, mode == "hq_latent",
                 json.dumps(extension_plan, ensure_ascii=False), json.dumps(plan, ensure_ascii=False),
                 mode == "single_pass")

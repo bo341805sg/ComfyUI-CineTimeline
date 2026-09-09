@@ -150,7 +150,7 @@ class CineTimelinePlan:
             "source_version_id": str((previous_version or {}).get("version_id", "")),
             "source_latent_path": str((previous_version or {}).get("latent_path", "")),
             "source_latent_sha256": str((previous_version or {}).get("latent_sha256", "")).lower(),
-            "save_prefix": f"ComfyOS/CineTimeline/Latents/{safe_shot}/{safe_run}/continuation",
+            "save_prefix": f"CineTimeline/Latents/{safe_shot}/{safe_run}/continuation",
             "shot_id": str(selected.get("shot_id", "")),
             "render_run_id": run_id,
         }

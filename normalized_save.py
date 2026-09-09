@@ -22,7 +22,7 @@ class CineSaveNormalizedVideo(io.ComfyNode):
             description="Saves a video and applies EBU R128 loudness normalization to its audio.",
             inputs=[
                 io.Video.Input("video"),
-                io.String.Input("filename_prefix", default="H3-CineTimeline/segments/segment"),
+                io.String.Input("filename_prefix", default="CineTimeline/segments/segment"),
                 io.Combo.Input("format", options=Types.VideoContainer.as_input(), default="mp4"),
                 io.DynamicCombo.Input(
                     "codec",

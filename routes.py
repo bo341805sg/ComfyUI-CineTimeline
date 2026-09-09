@@ -159,7 +159,7 @@ async def assemble_saved_segments(request: web.Request) -> web.Response:
             )
 
         output_root = Path(folder_paths.get_output_directory()).resolve()
-        final_dir = output_root / "H3-CineTimeline" / "final"
+        final_dir = output_root / "CineTimeline" / "final"
         final_dir.mkdir(parents=True, exist_ok=True)
         filename = f"complete_{uuid.uuid4().hex[:12]}.mp4"
         destination = final_dir / filename
@@ -189,7 +189,7 @@ async def assemble_saved_segments(request: web.Request) -> web.Response:
         relative = destination.relative_to(output_root).as_posix()
         return web.json_response({
             "ok": True,
-            "saved": {"filename": filename, "subfolder": "H3-CineTimeline/final", "type": "output"},
+            "saved": {"filename": filename, "subfolder": "CineTimeline/final", "type": "output"},
             "asset_id": relative,
             "width": expected[0],
             "height": expected[1],
