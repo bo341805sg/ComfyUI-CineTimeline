@@ -43,6 +43,64 @@ def _video_signature(path: Path) -> tuple[int, int, float]:
     return width, height, fps
 
 
+def _import_video_info(path):
+    import av
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        fps = float(stream.average_rate or 0)
+        width, height = stream.width, stream.height
+        frames = sum(1 for _ in container.decode(stream))
+    if fps <= 0 or frames <= 0:
+        raise ValueError("无法确认视频帧数和帧率")
+    return frames, fps, width, height
+
+
+def _validate_import_duration(frames, fps, expected):
+    if abs(fps - 24) > 0.01:
+        raise ValueError("当前时间轴要求24fps，请先转换视频帧率")
+    wanted = round(expected * 24)
+    if frames < wanted:
+        raise ValueError(f"视频只有{frames}帧，分段需要{wanted}帧；请缩短分段或选择更长视频")
+    if frames - wanted > 6:
+        raise ValueError("视频超过分段0.25秒以上，请先明确裁切范围或调整分段时长；不会自动删除续接上下文")
+    return wanted
+
+
+@PromptServer.instance.routes.post("/cinetimeline/import-normalize")
+async def normalize_imported_segment(request):
+    import asyncio
+    try:
+        data = await request.json()
+        source = _safe_output_asset(str(data.get("asset_id") or ""))
+        expected = float(data.get("duration") or 0)
+        if not 0 < expected <= 15:
+            raise ValueError("分段时长必须在0到15秒之间")
+        def process():
+            frames, fps, width, height = _import_video_info(source)
+            wanted = _validate_import_duration(frames, fps, expected)
+            destination = source.with_name(source.stem + "_normalized_" + uuid.uuid4().hex[:8] + ".mp4")
+            # Preserve the uploaded original; start at zero, never guess a context trim.
+            result = subprocess.run([
+                _ffmpeg_executable(), "-v", "error", "-nostdin", "-i", str(source),
+                "-map", "0:v:0", "-map", "0:a:0?", "-t", str(wanted / 24),
+                "-vf", f"trim=end_frame={wanted},setpts=PTS-STARTPTS",
+                "-af", f"apad,atrim=duration={wanted / 24},asetpts=PTS-STARTPTS",
+                "-r", "24", "-fps_mode", "cfr", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-movflags", "+faststart", str(destination)
+            ], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+            if result.returncode:
+                raise ValueError("导入副本处理失败：" + result.stderr[-500:])
+            actual, actual_fps, _, _ = _import_video_info(destination)
+            if actual != wanted or abs(actual_fps - 24) > 0.01:
+                raise ValueError("导入副本帧数校验未通过，未登记到时间轴")
+            return {"asset_id": destination.relative_to(Path(folder_paths.get_output_directory()).resolve()).as_posix(),
+                    "source_asset_id": data["asset_id"], "source_frames": frames,
+                    "frames": wanted, "width": width, "height": height}
+        return web.json_response(await asyncio.to_thread(process))
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+
 def _ffmpeg_executable() -> str:
     from imageio_ffmpeg import get_ffmpeg_exe
 
@@ -62,6 +120,8 @@ def _measure_integrated_loudness(path: Path) -> float:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=180,
         check=False,
     )
@@ -101,6 +161,8 @@ def _normalize_saved_video_audio(path: Path) -> Path:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=600,
         check=False,
     )
@@ -177,6 +239,8 @@ async def assemble_saved_segments(request: web.Request) -> web.Response:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=600,
                 check=False,
             )

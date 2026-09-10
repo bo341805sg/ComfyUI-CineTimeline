@@ -1,2 +1,1 @@
-// Canonical CineTimeline browser entry.
-import "./lib/cine_timeline_099.mjs?v=126";
+// Retired cache entry. The canonical loader is cine_timeline_entry_v119.js.

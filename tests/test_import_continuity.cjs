@@ -1,0 +1,15 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const src=fs.readFileSync(__dirname+'/../web_v90/lib/cine_timeline_099.mjs','utf8');
+const method=src.slice(src.indexOf('  automaticContinuity('),src.indexOf('  referenceUsage('));
+const ctx={};vm.createContext(ctx);vm.runInContext('this.editor={'+method+'}',ctx);
+const first={shot_id:'A',transition:'cut',metadata:{render:{active_version:'v1',versions:[{version_id:'v1',asset_id:'clip',imported_video:true,latent_path:'cache',latent_sha256:'a'.repeat(64)}]}}};
+const second={shot_id:'B',transition:'motion_context',metadata:{render:{active_version:'',versions:[]}}};
+Object.assign(ctx.editor,{state:{shots:[first,second]},effectiveReferences:()=>[],ensureShotRenderMetadata:s=>s.metadata.render});
+let result=ctx.editor.automaticContinuity(second);assert(result.previousReady&&!result.lineageStale);
+second.metadata.render={active_version:'v2',versions:[{version_id:'v2',asset_id:'next',latent_source_shot_id:'A',latent_source_version_id:'v1',latent_source_sha256:'a'.repeat(64)}]};
+assert(!ctx.editor.automaticContinuity(second).lineageStale);
+first.metadata.render.versions[0].latent_sha256='b'.repeat(64);
+assert(ctx.editor.automaticContinuity(second).lineageStale);
+first.metadata.render.versions[0].latent_path='';
+assert(!ctx.editor.automaticContinuity(second).previousReady);
+console.log('PASS ready imported source is not stale; matching generated successor valid; changed source invalidates successor; missing cache blocks continuation');

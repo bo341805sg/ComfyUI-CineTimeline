@@ -4,7 +4,12 @@ import { languageSelect, localizeDom, onLocaleChange, tr } from "./cine_i18n_099
 
 console.info("[CineTimeline] v0.11.0 dialogue validation routing loaded");
 
-const TIMELINE_LAYOUT_VERSION = 70;
+const TIMELINE_LAYOUT_VERSION = 71;
+function shotDisplayLabel(shots, shot) {
+  const index = shots.findIndex(item => item.shot_id === shot.shot_id);
+  const title = String(shot.title || shot.metadata?.title || "").trim();
+  return `第${index + 1}段${title ? " · " + title : ""}`;
+}
 const TIMELINE_SIZE_LAYOUT_VERSION = 7;
 const TIMELINE_DEFAULT_HEIGHT = 920;
 const TIMELINE_MIN_NODE_HEIGHT = 720;
@@ -186,7 +191,7 @@ function renderContextFromHistoryEntry(entry) {
     const directTargetId = String(node?.inputs?.render_target_shot_id || "").trim();
     const directRunId = String(node?.inputs?.render_run_id || "").trim();
     if (directTargetId) return { targetId: directTargetId, runId: directRunId, manifest };
-    const raw = node?.inputs?.timeline_json;
+    const raw = node?.inputs?.timeline_state || node?.inputs?.timeline_json;
     try {
       const plan = typeof raw === "string" ? JSON.parse(raw) : raw;
       const targetId = String(plan?.metadata?.render_target_shot_id || "").trim();
@@ -456,14 +461,18 @@ class CineTimelineWidget {
       // Widget names and object identities can shift while ComfyUI restores an
       // older workflow. Resolve the canonical state from its content on every
       // reload so a segment/run token can never be parsed as timeline JSON.
-      let canonicalSource = (this.node?.widgets || []).find((widget) => {
+      const isTimelineSource = (widget) => {
         try {
           const value = JSON.parse(String(widget?.value || ""));
           return value && typeof value === "object" && Array.isArray(value.shots);
         } catch {
           return false;
         }
-      });
+      };
+      const namedSource = (this.node?.widgets || []).find((widget) => widget.name === "timeline_state");
+      let canonicalSource = isTimelineSource(namedSource)
+        ? namedSource
+        : (this.node?.widgets || []).find(isTimelineSource);
       if (!canonicalSource) {
         const backup = String(this.node?.properties?.cineTimelineStateBackup || "");
         let backupState = null;
@@ -1048,7 +1057,7 @@ class CineTimelineWidget {
       mode === "motion_context" && previous && this.automaticContinuity(previous).lineageStale
     );
     const lineageStale = Boolean(
-      mode === "motion_context" && currentVersion?.asset_id && (
+      mode === "motion_context" && currentVersion?.asset_id && !currentVersion?.imported_video && (
         previousLineageStale || !previousVersion ||
           String(currentVersion.latent_source_shot_id || "") !== String(previous?.shot_id || "") ||
           String(currentVersion.latent_source_version_id || "") !== String(previousVersion.version_id || "") ||
@@ -1204,7 +1213,6 @@ class CineTimelineWidget {
       transition: this.state.shots.length ? "motion_context" : "cut",
       metadata: {
         duration_seconds: DEFAULT_SEGMENT_SECONDS,
-        postprocess_mode: "rtx_vsr",
         continuity_handle_frames: 1,
         render: { status: "empty", active_version: "", versions: [] },
       },
@@ -1283,16 +1291,133 @@ class CineTimelineWidget {
     return "image";
   }
 
-  async uploadInputFile(file, subfolder) {
+  async uploadInputFile(file, subfolder, storageType = "input") {
     const form = new FormData();
     form.append("image", file, file.name);
-    form.append("type", "input");
+    form.append("type", storageType);
     form.append("subfolder", subfolder);
     form.append("overwrite", "true");
     const response = await fetch("/upload/image", { method: "POST", body: form });
     if (!response.ok) throw new Error("HTTP " + response.status);
     const result = await response.json();
     return [result.subfolder, result.name].filter(Boolean).join("/");
+  }
+
+  async buildImportedCache(shot, version) {
+    if (this.importCacheBusy) return;
+    this.importCacheBusy = true;
+    version.cache_status = "preparing";
+    this.sync();
+    try {
+      const graph = this.node.graph || app.graph;
+      const serialized = await app.graphToPrompt(graph);
+      const output = serialized.output || {};
+      const exact = Object.entries(output).filter(([,n]) => n.class_type === "CineExactSegment");
+      const conditions = Object.entries(output).filter(([,n]) => ["CineTimelineH3ReferenceConditioning", "CineTimelineH3KeyframeConditioning"].includes(n.class_type));
+      if (exact.length !== 1 || conditions.length !== 1) throw new Error("无法唯一识别本工作流的原生尺寸和VAE，请保留一条CineTimeline生成链后重试");
+      const inputs = {video_vae:exact[0][1].inputs.video_vae, audio_vae:exact[0][1].inputs.audio_vae,
+        width:conditions[0][1].inputs.width, height:conditions[0][1].inputs.height,
+        asset_id:version.asset_id,version_id:version.version_id,duration:version.clip_duration_seconds};
+      const allowed = new Set(["VAELoader","SelectVAEDevice","CineNativeResolution","PrimitiveInt","PrimitiveFloat"]);
+      const prompt = {}, pending = Object.values(inputs).filter(v=>Array.isArray(v)&&v.length===2).map(v=>String(v[0]));
+      while (pending.length) {
+        const id = pending.pop(); if (prompt[id]) continue;
+        const n = output[id];
+        if (!n || !allowed.has(n.class_type)) throw new Error("续接缓存依赖包含非VAE/尺寸节点，已停止，避免触发主工作流");
+        prompt[id] = n;
+        for (const v of Object.values(n.inputs || {})) if (Array.isArray(v)&&v.length===2) pending.push(String(v[0]));
+      }
+      let cacheId = "cine_import_cache";
+      while (output[cacheId]) cacheId += "_";
+      prompt[cacheId] = {class_type:"CineImportAVCache",inputs};
+      const queued = await api.queuePrompt(0,{output:prompt,workflow:{}});
+      if (!queued?.prompt_id) throw new Error("缓存任务未返回编号");
+      version.cache_prompt_id = queued.prompt_id;
+      this.transientMessage = "视频已导入，续接缓存已排队；不运行主模型采样。";
+      this.sync();
+      let result;
+      for (let i=0;i<1800;i++) {
+        const response = await api.fetchApi(`/history/${encodeURIComponent(queued.prompt_id)}`);
+        if (!response.ok) throw new Error("缓存任务状态读取失败，可稍后重试");
+        const history = (await response.json())[queued.prompt_id];
+        if (history) {
+          if (history.status?.status_str === "error") throw new Error("VAE缓存任务失败，请查看任务错误并重试");
+          const text = history.outputs?.[cacheId]?.text?.[0];
+          if (text) { result = JSON.parse(text); break; }
+          if (history.status?.completed) throw new Error("任务结束但未返回缓存");
+        }
+        await new Promise(resolve=>setTimeout(resolve,1000));
+      }
+      if (!result) throw new Error("等待缓存超时，请查看任务队列");
+      const current = this.state.shots.find(s=>s.shot_id===shot.shot_id);
+      const render = current && this.ensureShotRenderMetadata(current);
+      const saved = render?.versions.find(v=>v.version_id===version.version_id);
+      if (!saved || saved.asset_id !== result.asset_id || result.version_id !== version.version_id) throw new Error("分段或视频版本已改变，未绑定旧缓存");
+      if (!result.latent_path || !/^[a-f0-9]{64}$/.test(result.latent_sha256 || "")) throw new Error("缓存校验信息无效");
+      Object.assign(saved,{latent_path:result.latent_path,latent_sha256:result.latent_sha256,
+        boundary_latent_path:result.latent_path,boundary_latent_sha256:result.latent_sha256,
+        cache_status:"ready",cache_width:result.width,cache_height:result.height});
+      this.transientMessage = "导入视频续接缓存已建立，可作为后段视频延长来源。";
+    } catch (error) {
+      version.cache_status="failed";
+      version.cache_error=String(error?.message || error);
+      this.transientMessage="视频保留，续接缓存未完成："+version.cache_error;
+    } finally {
+      this.importCacheBusy=false;
+      this.sync();
+    }
+  }
+
+  async importSegmentVideo(shot, file) {
+    if (!file || this.inferMediaType(file) !== "video") throw new Error("请选择视频文件");
+    if (this.autoAssemblyActive || this.state.metadata?.render_run_id || this.importingSegmentVideo) {
+      throw new Error("请等待当前生成或导入结束");
+    }
+    this.importingSegmentVideo = true;
+    const targetId = shot.shot_id;
+    const start = shot.start_frame, end = shot.end_frame;
+    const expected = framesToSeconds(end - start);
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    try {
+      const info = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("读取视频信息超时")), 15000);
+        video.onloadedmetadata = () => { clearTimeout(timer); resolve({duration: video.duration, width: video.videoWidth, height: video.videoHeight}); };
+        video.onerror = () => { clearTimeout(timer); reject(new Error("浏览器无法读取此视频，请转换为 MP4/H.264 后导入")); };
+        video.preload = "metadata"; video.src = url;
+      });
+      if (!Number.isFinite(info.duration) || info.width < 1) {
+        throw new Error(`视频为 ${Number(info.duration).toFixed(2)} 秒，当前分段为 ${expected.toFixed(2)} 秒；请先调整分段时长或裁切视频`);
+      }
+      const id = "IMPORT_" + globalThis.crypto.randomUUID();
+      const assetId = await this.uploadInputFile(file, "CineTimeline/imported_segments/" + id, "output");
+      const response = await api.fetchApi("/cinetimeline/import-normalize", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({asset_id: assetId, duration: expected}),
+      });
+      const imported = await response.json();
+      if (!response.ok || !imported.asset_id) throw new Error(imported.error || "导入时长核验失败");
+      const target = this.state.shots.find(item => item.shot_id === targetId);
+      if (target !== shot || target.start_frame !== start || target.end_frame !== end || this.state.metadata?.render_run_id || this.autoAssemblyActive) {
+        throw new Error("导入期间分段已改变或开始生成，视频已上传但未替换分段");
+      }
+      const render = this.ensureShotRenderMetadata(target);
+      render.versions.push({version_id: id, asset_id: imported.asset_id, storage_type: "output",
+        source_asset_id: assetId, source_frames: imported.source_frames,
+        created_at: new Date().toISOString(), note: "导入视频（未建立续接缓存）", approved: false,
+        imported_video: true, frames: end - start, clip_start_seconds: 0,
+        clip_duration_seconds: expected, width: info.width, height: info.height,
+        latent_path: "", latent_sha256: "", boundary_latent_path: "", boundary_latent_sha256: ""});
+      render.active_version = id; render.status = "generated";
+      if (this.state.metadata?.complete_movie) this.state.metadata.complete_movie.stale = true;
+      this.transientMessage = `${targetId} 已加载视频，旧版本保留；续接缓存尚未建立`;
+      this.sync();
+      await this.buildImportedCache(target, render.versions.find(v=>v.version_id===id));
+    } finally {
+      video.onloadedmetadata = video.onerror = null;
+      video.removeAttribute("src"); video.load(); URL.revokeObjectURL(url);
+      this.importingSegmentVideo = false;
+    }
   }
 
   async uploadReferenceFiles(scope, files, expectedMediaType = "") {
@@ -1368,11 +1493,12 @@ class CineTimelineWidget {
     }
   }
 
-  render() {
+  render({ preserveInspector = false } = {}) {
     if (!this.state) return;
     this.renderToolbar();
     this.renderTimeline();
-    this.renderInspector();
+    if (preserveInspector) this.refreshSegmentActions();
+    else this.renderInspector();
     const invalid = this.invalidShots();
     this.status.classList.toggle("invalid", invalid.length > 0);
     const totalSeconds = this.state.shots.length ? framesToSeconds(this.state.total_frames).toFixed(1) : "0.0";
@@ -1682,7 +1808,8 @@ class CineTimelineWidget {
       block.append(el("span", "cine-shot-mode", "纯文生"));
     }
     const caption = el("div", "cine-shot-caption");
-    caption.append(el("strong", "", shot.shot_id));
+    caption.append(el("strong", "", shotDisplayLabel(this.state.shots, shot)));
+    caption.title = "内部编号：" + shot.shot_id;
     caption.append(el("span", "cine-duration", framesToSeconds(shot.end_frame - shot.start_frame).toFixed(1) + "s"));
     block.append(caption);
     const durationHandle = el("span", "cine-duration-handle");
@@ -1876,6 +2003,8 @@ class CineTimelineWidget {
   }
 
   renderInspector() {
+    this.rememberEditorLayout();
+    const scrollTop = this.inspector.scrollTop;
     this.inspector.replaceChildren();
     this.inspector.append(this.renderGlobalSettings());
     const music = this.activeMusic();
@@ -1883,6 +2012,40 @@ class CineTimelineWidget {
     const shot = this.activeShot();
     if (shot) this.inspector.append(this.renderSegmentSettings(shot));
     else this.inspector.append(el("div", "cine-empty", "请先添加一个 5.0 秒片段。"));
+    this.inspector.scrollTop = scrollTop;
+  }
+
+  rememberEditorLayout() {
+    this.node.properties ??= {};
+    const sizes = this.node.properties.cineTextareaLayout ||= {};
+    for (const input of this.inspector.querySelectorAll("textarea[data-cine-layout-key]")) {
+      const height = parseFloat(input.style.height);
+      if (Number.isFinite(height) && height > 0) {
+        sizes[input.dataset.cineLayoutKey] = { height, scrollTop: input.scrollTop };
+      }
+    }
+  }
+
+  bindEditorLayout(input, key) {
+    input.dataset.cineLayoutKey = key;
+    const saved = this.node.properties?.cineTextareaLayout?.[key];
+    if (Number.isFinite(saved?.height) && saved.height > 0) {
+      input.style.height = `${saved.height}px`;
+      requestAnimationFrame(() => { input.scrollTop = saved.scrollTop || 0; });
+    }
+    input.addEventListener("pointerup", () => this.rememberEditorLayout());
+  }
+
+  refreshSegmentActions() {
+    const shot = this.activeShot();
+    if (!shot) return;
+    const usage = this.referenceUsage(shot);
+    const busy = this.autoAssemblyActive || Boolean(this.state.metadata?.render_run_id);
+    for (const button of this.inspector.querySelectorAll("[data-cine-segment-action]")) {
+      button.disabled = Boolean(busy || (button.dataset.cineSegmentAction === "generate"
+        ? !usage.valid || (usage.autoContinuity && !usage.previousReady)
+        : Boolean(this.importingSegmentVideo)));
+    }
   }
 
   renderGlobalSettings() {
@@ -2111,7 +2274,7 @@ class CineTimelineWidget {
     const currentShot = this.state?.shots?.find((item) => String(item.shot_id || "") === requestedShotId);
     if (!currentShot) {
       this.transientMessage = `找不到当前片段 ${requestedShotId || "（未知）"}，请重新选择片段`;
-      this.render();
+      this.render({ preserveInspector: true });
       return false;
     }
     shot = currentShot;
@@ -2139,7 +2302,7 @@ class CineTimelineWidget {
       }
       if (queueBusy) {
         this.transientMessage = `${activeTargetId} 已在生成队列中，请等待当前任务完成`;
-        this.render();
+        this.render({ preserveInspector: true });
         return false;
       }
       delete this.state.metadata.render_target_shot_id;
@@ -2152,7 +2315,7 @@ class CineTimelineWidget {
       if (fromAutoAssembly) this.stopAutoAssembly(`自动补全已停止：${shot.shot_id} 未通过参考校验`);
       else {
         this.transientMessage = `${shot.shot_id} 未通过参考校验，不能单独生成`;
-        this.render();
+        this.render({ preserveInspector: true });
       }
       return false;
     }
@@ -2161,7 +2324,7 @@ class CineTimelineWidget {
       if (fromAutoAssembly) this.stopAutoAssembly(`自动补全已停止：${shot.shot_id} 的上一片段尚未生成`);
       else {
         this.transientMessage = "请先生成上一片段，或把当前片段转场改为直接切换";
-        this.render();
+        this.render({ preserveInspector: true });
       }
       return false;
     }
@@ -2177,6 +2340,7 @@ class CineTimelineWidget {
     render.status = "redo";
     this.transientMessage = `正在把 ${shot.shot_id} 加入单片段生成队列…`;
     this.persistStateOnly();
+    this.render({ preserveInspector: true });
     try {
       const saveNode = this.findOutputNode("CineSaveNormalizedVideo")
         || this.findOutputNode("CineSaveSegmentVideo")
@@ -2221,7 +2385,7 @@ class CineTimelineWidget {
       this.transientMessage = fromAutoAssembly
         ? `${shot.shot_id} 已加入队列；完成后将自动检查下一片段`
         : `${shot.shot_id} 已加入单片段生成队列`;
-      this.render();
+      this.render({ preserveInspector: true });
       return true;
     } catch (error) {
       delete this.state.metadata.render_target_shot_id;
@@ -2233,7 +2397,7 @@ class CineTimelineWidget {
       else {
         this.transientMessage = `片段生成未排队：${error?.message || error}`;
         this.persistStateOnly();
-        this.render();
+        this.render({ preserveInspector: true });
       }
       return false;
     }
@@ -2250,11 +2414,12 @@ class CineTimelineWidget {
 
     const duration = framesToSeconds(shot.end_frame - shot.start_frame).toFixed(1);
     const summary = el("summary", "cine-settings-summary");
-    summary.append(el("strong", "", "当前片段 · " + shot.shot_id));
+    summary.append(el("strong", "", "当前片段 · " + shotDisplayLabel(this.state.shots, shot)));
     summary.append(el("span", "cine-settings-badge", duration + " 秒"));
     panel.append(summary);
 
     const fields = el("div", "cine-fields");
+    this.objectField(fields, "分段名称（剧情名称）", shot, "title");
     const promptEditor = this.shotTextarea(fields, "片段提示词（可包含多个镜头）", shot, "local_prompt");
     const primary = el("div", "cine-primary-row");
     this.shotDurationField(primary, shot);
@@ -2266,15 +2431,9 @@ class CineTimelineWidget {
       },
     });
     shot.metadata ??= {};
-    if (!shot.metadata.postprocess_mode) shot.metadata.postprocess_mode = "rtx_vsr";
-    this.objectField(primary, "采样方案", shot.metadata, "postprocess_mode", {
-      values: ["single_pass", "rtx_vsr", "hq_latent"],
-      labels: {
-        single_pass: "单次采样（不做二次采样）",
-        rtx_vsr: "RTX VSR（默认 / 快速）",
-        hq_latent: "潜空间 2× + H3 四步精修（高质量）",
-      },
-    });
+    // Production has one fixed postprocess route: RTX VSR. Remove the old
+    // per-shot selector and discard stale authoring values during the next sync.
+    delete shot.metadata.postprocess_mode;
     fields.append(primary);
     fields.append(this.renderReferenceEditor("shot", shot));
     const continuity = this.automaticContinuity(shot);
@@ -2288,6 +2447,7 @@ class CineTimelineWidget {
     const rerender = this.button("生成当前片段", () => this.queueSingleShot(shot, {
       promptSnapshot: promptEditor.value,
     }));
+    rerender.dataset.cineSegmentAction = "generate";
     const usage = this.referenceUsage(shot);
     rerender.disabled = this.autoAssemblyActive || !usage.valid || (usage.autoContinuity && !usage.previousReady);
     rerender.title = usage.autoContinuity && !usage.previousReady
@@ -2296,8 +2456,31 @@ class CineTimelineWidget {
         : "先生成上一片段，程序才能提取其尾帧；也可以改用直接切换")
       : "只生成当前片段；续接模式会读取上一片段当前激活版本";
     actions.append(rerender);
+    const importVideo = this.button("加载本段视频", () => {
+      const input = document.createElement("input");
+      input.type = "file"; input.accept = "video/*,.mp4,.mov,.mkv,.webm";
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        try { await this.importSegmentVideo(shot, file); }
+        catch (error) { this.transientMessage = "视频导入失败：" + String(error?.message || error); this.render(); }
+      };
+      input.click();
+    });
+    importVideo.disabled = this.autoAssemblyActive || Boolean(this.state.metadata?.render_run_id) || Boolean(this.importingSegmentVideo);
+    importVideo.dataset.cineSegmentAction = "import";
+    importVideo.title = "将已有视频作为本段的新结果版本，保留旧版本；时长须与分段一致";
+    actions.append(importVideo);
     actions.append(this.button("删除当前片段", () => this.deleteCurrentShot(), "danger"));
     fields.append(actions);
+    const activeRender = this.ensureShotRenderMetadata(shot);
+    const activeVideo = activeRender.versions.find(item => item.version_id === activeRender.active_version);
+    if (activeVideo?.imported_video && !activeVideo.latent_path) {
+      fields.append(el("div", "cine-note pending", this.importCacheBusy ? "续接缓存正在排队或建立；视频仍可预览。" : "尚无续接缓存："+(activeVideo.cache_error || "可点击下方按钮建立")));
+      const rebuild=this.button("建立 / 重试续接缓存",()=>this.buildImportedCache(shot,activeVideo));
+      rebuild.disabled=Boolean(this.importCacheBusy || this.autoAssemblyActive || this.state.metadata?.render_run_id);
+      fields.append(rebuild);
+    }
     panel.append(fields);
     return panel;
   }
@@ -2305,6 +2488,7 @@ class CineTimelineWidget {
   timelineTextarea(grid, label, key) {
     const wrap = el("label", "cine-field full prompt", label);
     const input = document.createElement("textarea");
+    this.bindEditorLayout(input, `global:${key}`);
     input.value = this.state[key] || "";
     input.addEventListener("input", () => {
       this.state[key] = input.value;
@@ -2320,6 +2504,7 @@ class CineTimelineWidget {
   shotTextarea(grid, label, shot, key) {
     const wrap = el("label", "cine-field full prompt", label);
     const input = document.createElement("textarea");
+    this.bindEditorLayout(input, `shot:${shot.shot_id}:${key}`);
     input.value = shot[key] || "";
     input.dataset.cineShotId = String(shot.shot_id || "");
     input.dataset.cineShotKey = key;
@@ -2869,10 +3054,10 @@ function installH3LatentPreviewListener() {
 // preview events as soon as a queued prompt is accepted.
 installH3LatentPreviewListener();
 
-if (!globalThis.__cineTimelineEditorV97) {
-  globalThis.__cineTimelineEditorV97 = true;
+if (!globalThis.__cineTimelineEditorV98) {
+  globalThis.__cineTimelineEditorV98 = true;
   app.registerExtension({
-    name: "ComfyUI.CineTimeline.Editor.V97",
+    name: "ComfyUI.CineTimeline.Editor.V98",
     setup() {
       // H3 two-pass workflows hold several large frame/latent tensors at once.
       // Keeping VHS intermediates across stages can exhaust host/GPU memory and

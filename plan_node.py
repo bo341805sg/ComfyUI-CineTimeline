@@ -71,6 +71,16 @@ class CineTimelinePlan:
         # The editor's hidden timeline_state can temporarily be an empty shell
         # during frontend migrations/cache recovery and must not mask it.
         target_id = str(render_target_shot_id or "").strip()
+        run_id = str(render_run_id or "").strip()
+        try:
+            editor = json.loads(timeline_state or "{}")
+        except (TypeError, ValueError):
+            editor = {}
+        editor_metadata = editor.get("metadata", {}) if isinstance(editor, dict) else {}
+        if not isinstance(editor_metadata, dict):
+            editor_metadata = {}
+        target_id = target_id or str(editor_metadata.get("render_target_shot_id") or "").strip()
+        run_id = run_id or str(editor_metadata.get("render_run_id") or "").strip()
         connected = None
         try:
             connected = normalize_timeline(timeline_json)
@@ -87,7 +97,6 @@ class CineTimelinePlan:
         shots = normalized.get("shots", [])
         if not shots:
             raise TimelineValidationError("timeline needs at least one shot")
-        run_id = str(render_run_id or "").strip()
         metadata = normalized.setdefault("metadata", {})
         if target_id:
             if not any(str(shot.get("shot_id", "")) == target_id for shot in shots):
@@ -131,7 +140,10 @@ class CineTimelinePlan:
             target = max(5, requested_frame_count + 22)
             lower = target - ((target - 5) % 17)
             upper = lower if lower == target else lower + 17
-            frame_count = lower if target - lower <= upper - target else upper
+            # Never round down: the finalizer must have enough frames after
+            # removing the pinned context to deliver the requested duration.
+            frame_count = upper
+        # Keep old graph selectors compatible; new graphs use CinePostprocessMode.
         postprocess_mode = str(selected.get("metadata", {}).get("postprocess_mode", "rtx_vsr"))
         hq_refinement = postprocess_mode == "hq_latent"
         single_pass = postprocess_mode == "single_pass"
@@ -192,10 +204,12 @@ class CineTimelinePlan:
         tag_names = {"image": "Picture", "video": "Video", "audio": "Audio"}
         for media_type, mapping in ordinal_maps.items():
             tag = tag_names[media_type]
-            for source in sorted(mapping, reverse=True):
-                segment_prompt = re.sub(
-                    rf"<{tag}\s+{source}>", f"<{tag} {mapping[source]}>", segment_prompt
-                )
+            segment_prompt = re.sub(
+                rf"<{tag}\s+(\d+)>",
+                lambda match: f"<{tag} {mapping[int(match.group(1))]}>"
+                if int(match.group(1)) in mapping else match.group(0),
+                segment_prompt,
+            )
         # Legacy direct-input workflows remain readable, but newly authored timeline
         # references are carried as asset-backed media entries below.
         image_slots = [

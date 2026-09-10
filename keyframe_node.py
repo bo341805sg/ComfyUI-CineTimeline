@@ -26,7 +26,9 @@ DEFAULT_KEYFRAME_TIMELINE = json.dumps({
 
 def _neutralize_keyframe_media_tags(prompt: str) -> str:
     return re.sub(
-        r"<Picture\s+(\d+)>", r"关键帧图像\1", str(prompt or ""), flags=re.IGNORECASE,
+        r"<\s*(?:Picture|Image|Subject)\s*(\d+)\s*>|(?<![\w<])(?:Picture|Image|Subject)\s*#?\s*(\d+)\b",
+        lambda match: "关键帧图像" + (match.group(1) or match.group(2)),
+        str(prompt or ""), flags=re.IGNORECASE,
     )
 
 
@@ -130,11 +132,20 @@ class CineTimelineKeyframePlan:
                 source = timeline_json
         timeline = json.loads(source)
         shots = timeline.get("shots") or []
+        if target and not any(str(shot.get("shot_id") or "") == target for shot in shots):
+            raise TimelineValidationError(f"timeline target does not exist: {target}")
         index = next((i for i, shot in enumerate(shots) if str(shot.get("shot_id") or "") == target), 0)
         plan = compile_keyframe_timeline(source, index + 1)
         shot = shots[index]
         extension = index > 0 and str(shot.get("transition") or "cut") == "motion_context"
         context = 22 if extension else 0
+        # Delivered frame zero comes after the pinned continuation head.
+        # Keep global authoring coordinates unchanged; offset only guide
+        # coordinates used by the sampler so the first guide is not dropped.
+        plan["context_frame_offset"] = context
+        if context:
+            plan["guides"] = [{**guide, "local_frame": guide["local_frame"] + context}
+                              for guide in plan["guides"]]
         requested = context + plan["frame_count"]
         generation = requested
         while generation % 17 != 5:
@@ -169,6 +180,7 @@ class CineTimelineKeyframePlan:
                           "source_latent_sha256": str((previous_version or {}).get("latent_sha256", "")).lower(),
                           "shot_id": plan["segment_id"], "render_run_id": run_id,
                           "save_prefix": f"CineTimeline/Latents/{safe_shot}/{safe_run}/continuation"}
+        # New graphs select postprocessing independently; preserve legacy sockets.
         return (model, plan["prompt"], generation, mode == "hq_latent",
                 json.dumps(extension_plan, ensure_ascii=False), json.dumps(plan, ensure_ascii=False),
                 mode == "single_pass")
